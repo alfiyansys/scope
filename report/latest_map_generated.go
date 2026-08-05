@@ -19,6 +19,34 @@ type stringLatestEntry struct {
 	dummySelfer
 }
 
+// _stringLatestEntry mirrors stringLatestEntry's codec-relevant fields
+// without the embedded dummySelfer, so encoding/decoding it falls back to
+// plain reflection instead of dummySelfer's promoted (panicking) methods.
+//
+// dummySelfer exists so the real per-entry Codec{Encode,Decode}Self would
+// normally come from running `make static`'s codecgen step (see the
+// package comment at the top of this file) - that step needs a legacy
+// GOPATH-mode tool that isn't available outside the containerized build.
+// These two hand-written methods are the actual, checked-in replacement:
+// small and stable enough (2 fields) not to need generated code, and this
+// is the same escape hatch report/backcompat.go already uses for Node.
+type _stringLatestEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Value     string    `json:"value"`
+}
+
+// CodecEncodeSelf implements codec.Selfer.
+func (e *stringLatestEntry) CodecEncodeSelf(encoder *codec.Encoder) {
+	encoder.Encode(&_stringLatestEntry{Timestamp: e.Timestamp, Value: e.Value})
+}
+
+// CodecDecodeSelf implements codec.Selfer.
+func (e *stringLatestEntry) CodecDecodeSelf(decoder *codec.Decoder) {
+	var tmp _stringLatestEntry
+	decoder.Decode(&tmp)
+	e.Timestamp, e.Value = tmp.Timestamp, tmp.Value
+}
+
 // String returns the StringLatestEntry's string representation.
 func (e *stringLatestEntry) String() string {
 	return fmt.Sprintf("%v (%s)", e.Value, e.Timestamp.Format(time.RFC3339))
