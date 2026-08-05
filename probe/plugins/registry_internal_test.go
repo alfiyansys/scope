@@ -153,7 +153,7 @@ func checkLoadedPlugins(t *testing.T, forEach iterator, expected []xfer.PluginSp
 	})
 	sort.Sort(xfer.PluginSpecsByID(plugins))
 	if !reflect.DeepEqual(plugins, expected) {
-		t.Fatalf(test.Diff(expected, plugins))
+		t.Fatalf("%s", test.Diff(expected, plugins))
 	}
 }
 

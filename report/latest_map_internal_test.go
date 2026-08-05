@@ -61,12 +61,12 @@ func TestLatestMapDeepEquals(t *testing.T) {
 	have := MakeStringLatestMap().
 		Set("foo", now, "Bar")
 	if !reflect.DeepEqual(want, have) {
-		t.Errorf(test.Diff(want, have))
+		t.Errorf("%s", test.Diff(want, have))
 	}
 	notequal := MakeStringLatestMap().
 		Set("foo", now, "Baz")
 	if reflect.DeepEqual(want, notequal) {
-		t.Errorf(test.Diff(want, have))
+		t.Errorf("%s", test.Diff(want, have))
 	}
 }
 
