@@ -2,24 +2,31 @@
 
 Weave Scope is licensed under the [Apache 2.0 license](LICENSE).
 
-Some vendored code is under different licenses though, all of them ship the
-entire license text they are under.
+Some dependencies are under different licenses though.
 
-- https://github.com/weaveworks/go-checkpoint  
-  https://github.com/weaveworks/go-cleanhttp  
-  https://github.com/certifi/gocertifi  
-  can be found in the ./vendor/ directory, is under MPL-2.0.
+Note: this repo built with a committed `vendor/` directory (Go's `-mod
+vendor` mode) through 2026-08, which physically bundled dependency source
+and license text under `./vendor/`. As of Phase 2 of
+`MODERNIZATION-PLAN.md`, `vendor/` was dropped in favor of building
+straight from `go.sum`/the module cache — the paths below no longer exist
+in this repo. The pinned version of each dependency (and its license
+text) is still verifiable via `go.sum` and fetchable from the upstream
+repository at that exact version; nothing here changes what's actually
+linked into the built binary, only where its source physically lives.
 
-- Pulled in by dependencies are  
-  https://github.com/hashicorp/go-version (MPL-2.0)  
-  https://github.com/hashicorp/golang-lru (MPL-2.0)
+- Under MPL-2.0, still pinned in `go.mod`:
+  - https://github.com/weaveworks/go-checkpoint
+  - https://github.com/hashicorp/go-cleanhttp
+  - https://github.com/certifi/gocertifi
+  - https://github.com/hashicorp/golang-lru (pulled in transitively)
 
-- One file pulled in by a dependency is under CDDL:  
-  ./vendor/github.com/howeyc/gopass/terminal_solaris.go
+- The docs of a dependency that's pulled in transitively are under
+  CC-BY 4.0: https://github.com/docker/go-units (still pinned in `go.mod`)
 
-- The docs of a dependency that's pulled in by a dependency
-  are under CC-BY 4.0:
-  ./vendor/github.com/docker/go-units/
+- No longer dependencies (stale even before the `vendor/` removal, so
+  removed here too): `hashicorp/go-version` and `howeyc/gopass`
+  (the CDDL-licensed `terminal_solaris.go` this used to flag) aren't in
+  `go.mod` at all anymore.
 
 [One file used in tests](COPYING.LGPL-3) is under LGPL-3, that's why we ship
 the license text in this repository.

@@ -1,11 +1,17 @@
 package docker
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	"github.com/armon/go-radix"
-	docker_client "github.com/fsouza/go-dockerclient"
+	"github.com/docker/docker/api/types"
+	containertypes "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
+	dockerclient "github.com/docker/docker/client"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/weaveworks/scope/probe/controls"
@@ -36,12 +42,12 @@ type Registry interface {
 	Stop()
 	LockedPIDLookup(f func(func(int) Container))
 	WalkContainers(f func(Container))
-	WalkImages(f func(docker_client.APIImages))
-	WalkNetworks(f func(docker_client.Network))
+	WalkImages(f func(image.Summary))
+	WalkNetworks(f func(network.Summary))
 	WatchContainerUpdates(ContainerUpdateWatcher)
 	GetContainer(string) (Container, bool)
 	GetContainerByPrefix(string) (Container, bool)
-	GetContainerImage(string) (docker_client.APIImages, bool)
+	GetContainerImage(string) (image.Summary, bool)
 }
 
 // ContainerUpdateWatcher is the type of functions that get called when containers are updated.
@@ -62,38 +68,42 @@ type registry struct {
 	watchers        []ContainerUpdateWatcher
 	containers      *radix.Tree
 	containersByPID map[int]Container
-	images          map[string]docker_client.APIImages
-	networks        []docker_client.Network
+	images          map[string]image.Summary
+	networks        []network.Summary
 	pipeIDToexecID  map[string]string
 }
 
-// Client interface for mocking.
+// Client is the little bit of the official Docker SDK client we need.
+// Modeled directly on github.com/docker/docker/client.APIClient so a real
+// *dockerclient.Client satisfies it without an adapter.
 type Client interface {
-	ListContainers(docker_client.ListContainersOptions) ([]docker_client.APIContainers, error)
-	InspectContainer(string) (*docker_client.Container, error)
-	ListImages(docker_client.ListImagesOptions) ([]docker_client.APIImages, error)
-	ListNetworks() ([]docker_client.Network, error)
-	AddEventListener(chan<- *docker_client.APIEvents) error
-	RemoveEventListener(chan *docker_client.APIEvents) error
+	ContainerList(ctx context.Context, options containertypes.ListOptions) ([]containertypes.Summary, error)
+	ContainerInspect(ctx context.Context, containerID string) (containertypes.InspectResponse, error)
+	ImageList(ctx context.Context, options image.ListOptions) ([]image.Summary, error)
+	NetworkList(ctx context.Context, options network.ListOptions) ([]network.Summary, error)
+	Events(ctx context.Context, options events.ListOptions) (<-chan events.Message, <-chan error)
 
-	StopContainer(string, uint) error
-	StartContainer(string, *docker_client.HostConfig) error
-	RestartContainer(string, uint) error
-	PauseContainer(string) error
-	UnpauseContainer(string) error
-	RemoveContainer(docker_client.RemoveContainerOptions) error
-	AttachToContainerNonBlocking(docker_client.AttachToContainerOptions) (docker_client.CloseWaiter, error)
-	CreateExec(docker_client.CreateExecOptions) (*docker_client.Exec, error)
-	StartExecNonBlocking(string, docker_client.StartExecOptions) (docker_client.CloseWaiter, error)
-	Stats(docker_client.StatsOptions) error
-	ResizeExecTTY(id string, height, width int) error
+	ContainerStop(ctx context.Context, containerID string, options containertypes.StopOptions) error
+	ContainerStart(ctx context.Context, containerID string, options containertypes.StartOptions) error
+	ContainerRestart(ctx context.Context, containerID string, options containertypes.StopOptions) error
+	ContainerPause(ctx context.Context, containerID string) error
+	ContainerUnpause(ctx context.Context, containerID string) error
+	ContainerRemove(ctx context.Context, containerID string, options containertypes.RemoveOptions) error
+	ContainerAttach(ctx context.Context, containerID string, options containertypes.AttachOptions) (types.HijackedResponse, error)
+	ContainerExecCreate(ctx context.Context, containerID string, options containertypes.ExecOptions) (containertypes.ExecCreateResponse, error)
+	ContainerExecAttach(ctx context.Context, execID string, options containertypes.ExecAttachOptions) (types.HijackedResponse, error)
+	ContainerExecResize(ctx context.Context, execID string, options containertypes.ResizeOptions) error
+	ContainerStats(ctx context.Context, containerID string, stream bool) (containertypes.StatsResponseReader, error)
 }
 
 func newDockerClient(endpoint string) (Client, error) {
+	opts := []dockerclient.Opt{dockerclient.WithAPIVersionNegotiation()}
 	if endpoint == "" {
-		return docker_client.NewClientFromEnv()
+		opts = append(opts, dockerclient.FromEnv)
+	} else {
+		opts = append(opts, dockerclient.WithHost(endpoint))
 	}
-	return docker_client.NewClient(endpoint)
+	return dockerclient.NewClientWithOpts(opts...)
 }
 
 // RegistryOptions are used to initialize the Registry
@@ -118,7 +128,7 @@ func NewRegistry(options RegistryOptions) (Registry, error) {
 	r := &registry{
 		containers:      radix.New(),
 		containersByPID: map[int]Container{},
-		images:          map[string]docker_client.APIImages{},
+		images:          map[string]image.Summary{},
 		pipeIDToexecID:  map[string]string{},
 
 		client:                 client,
@@ -176,30 +186,21 @@ func (r *registry) listenForEvents() bool {
 	// Next, start listening for events.  We do this before fetching
 	// the list of containers so we don't miss containers created
 	// after listing but before listening for events.
-	// Use a buffered chan so the client library can run ahead of the listener
-	// - Docker will drop an event if it is not collected quickly enough.
-	events := make(chan *docker_client.APIEvents, 1024)
-	if err := r.client.AddEventListener(events); err != nil {
-		log.Errorf("docker registry: %s", err)
-		return true
-	}
-	defer func() {
-		if err := r.client.RemoveEventListener(events); err != nil {
-			log.Errorf("docker registry: %s", err)
-		}
-	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eventCh, errCh := r.client.Events(ctx, events.ListOptions{})
 
-	if err := r.updateContainers(); err != nil {
+	if err := r.updateContainers(ctx); err != nil {
 		log.Errorf("docker registry: %s", err)
 		return true
 	}
 
-	if err := r.updateImages(); err != nil {
+	if err := r.updateImages(ctx); err != nil {
 		log.Errorf("docker registry: %s", err)
 		return true
 	}
 
-	if err := r.updateNetworks(); err != nil {
+	if err := r.updateNetworks(ctx); err != nil {
 		log.Errorf("docker registry: %s", err)
 		return true
 	}
@@ -207,19 +208,26 @@ func (r *registry) listenForEvents() bool {
 	otherUpdates := time.Tick(r.interval)
 	for {
 		select {
-		case event, ok := <-events:
+		case event, ok := <-eventCh:
 			if !ok {
 				log.Errorf("docker registry: event listener unexpectedly disconnected")
 				return true
 			}
-			r.handleEvent(event)
+			r.handleEvent(ctx, event)
+
+		case err, ok := <-errCh:
+			if !ok || err == nil {
+				continue
+			}
+			log.Errorf("docker registry: event stream error: %s", err)
+			return true
 
 		case <-otherUpdates:
-			if err := r.updateImages(); err != nil {
+			if err := r.updateImages(ctx); err != nil {
 				log.Errorf("docker registry: %s", err)
 				return true
 			}
-			if err := r.updateNetworks(); err != nil {
+			if err := r.updateNetworks(ctx); err != nil {
 				log.Errorf("docker registry: %s", err)
 				return true
 			}
@@ -253,25 +261,25 @@ func (r *registry) reset() {
 
 	r.containers = radix.New()
 	r.containersByPID = map[int]Container{}
-	r.images = map[string]docker_client.APIImages{}
+	r.images = map[string]image.Summary{}
 	r.networks = r.networks[:0]
 }
 
-func (r *registry) updateContainers() error {
-	apiContainers, err := r.client.ListContainers(docker_client.ListContainersOptions{All: true})
+func (r *registry) updateContainers(ctx context.Context) error {
+	apiContainers, err := r.client.ContainerList(ctx, containertypes.ListOptions{All: true})
 	if err != nil {
 		return err
 	}
 
 	for _, apiContainer := range apiContainers {
-		r.updateContainerState(apiContainer.ID)
+		r.updateContainerState(ctx, apiContainer.ID)
 	}
 
 	return nil
 }
 
-func (r *registry) updateImages() error {
-	images, err := r.client.ListImages(docker_client.ListImagesOptions{})
+func (r *registry) updateImages(ctx context.Context) error {
+	images, err := r.client.ImageList(ctx, image.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -279,15 +287,15 @@ func (r *registry) updateImages() error {
 	r.Lock()
 	defer r.Unlock()
 
-	for _, image := range images {
-		r.images[trimImageID(image.ID)] = image
+	for _, img := range images {
+		r.images[trimImageID(img.ID)] = img
 	}
 
 	return nil
 }
 
-func (r *registry) updateNetworks() error {
-	networks, err := r.client.ListNetworks()
+func (r *registry) updateNetworks(ctx context.Context) error {
+	networks, err := r.client.NetworkList(ctx, network.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -299,31 +307,35 @@ func (r *registry) updateNetworks() error {
 	return nil
 }
 
-func (r *registry) handleEvent(event *docker_client.APIEvents) {
+func (r *registry) handleEvent(ctx context.Context, event events.Message) {
 	// TODO: Send shortcut reports on networks being created/destroyed?
-	switch event.Status {
+	action := string(event.Action)
+	if event.Type == events.NetworkEventType {
+		action = "network:" + action
+	}
+	switch action {
 	case CreateEvent, RenameEvent, StartEvent, DieEvent, PauseEvent, UnpauseEvent, NetworkConnectEvent, NetworkDisconnectEvent:
-		r.updateContainerState(event.ID)
+		r.updateContainerState(ctx, event.Actor.ID)
 	case DestroyEvent:
 		r.Lock()
-		r.deleteContainer(event.ID)
+		r.deleteContainer(event.Actor.ID)
 		r.Unlock()
-		r.sendDeletedUpdate(event.ID)
+		r.sendDeletedUpdate(event.Actor.ID)
 	}
 }
 
-func (r *registry) updateContainerState(containerID string) {
+func (r *registry) updateContainerState(ctx context.Context, containerID string) {
 	r.Lock()
 	defer r.Unlock()
 
-	dockerContainer, err := r.client.InspectContainer(containerID)
+	dockerContainer, err := r.client.ContainerInspect(ctx, containerID)
 	if err != nil {
-		if _, ok := err.(*docker_client.NoSuchContainer); !ok {
-			log.Errorf("Unable to get status for container %s: %v", containerID, err)
+		if dockerclient.IsErrNotFound(err) {
+			// Docker says the container doesn't exist - remove it from our data
+			r.deleteContainer(containerID)
 			return
 		}
-		// Docker says the container doesn't exist - remove it from our data
-		r.deleteContainer(containerID)
+		log.Errorf("Unable to get status for container %s: %v", containerID, err)
 		return
 	}
 
@@ -331,13 +343,13 @@ func (r *registry) updateContainerState(containerID string) {
 	o, ok := r.containers.Get(containerID)
 	var c Container
 	if !ok {
-		c = NewContainerStub(dockerContainer, r.hostID, r.noCommandLineArguments, r.noEnvironmentVariables)
+		c = NewContainerStub(&dockerContainer, r.hostID, r.noCommandLineArguments, r.noEnvironmentVariables)
 		r.containers.Insert(containerID, c)
 	} else {
 		c = o.(Container)
 		// potentially remove existing pid mapping.
 		delete(r.containersByPID, c.PID())
-		c.UpdateState(dockerContainer)
+		c.UpdateState(&dockerContainer)
 	}
 
 	// Update PID index
@@ -353,7 +365,7 @@ func (r *registry) updateContainerState(containerID string) {
 
 	// And finally, ensure we gather stats for it
 	if r.collectStats {
-		if dockerContainer.State.Running {
+		if dockerContainer.State != nil && dockerContainer.State.Running {
 			if err := c.StartGatheringStats(r.client); err != nil {
 				log.Errorf("Error gathering stats for container %s: %s", containerID, err)
 				return
@@ -438,35 +450,35 @@ func (r *registry) GetContainerByPrefix(prefix string) (Container, bool) {
 	return nil, false
 }
 
-func (r *registry) GetContainerImage(id string) (docker_client.APIImages, bool) {
+func (r *registry) GetContainerImage(id string) (image.Summary, bool) {
 	r.RLock()
 	defer r.RUnlock()
-	image, ok := r.images[id]
-	return image, ok
+	img, ok := r.images[id]
+	return img, ok
 }
 
 // WalkImages runs f on every image of running containers the registry
 // knows of.  f may be run on the same image more than once.
-func (r *registry) WalkImages(f func(docker_client.APIImages)) {
+func (r *registry) WalkImages(f func(image.Summary)) {
 	r.RLock()
 	defer r.RUnlock()
 
 	// Loop over containers so we only emit images for running containers.
 	r.containers.Walk(func(_ string, c interface{}) bool {
-		image, ok := r.images[c.(Container).Image()]
+		img, ok := r.images[c.(Container).Image()]
 		if ok {
-			f(image)
+			f(img)
 		}
 		return false
 	})
 }
 
 // WalkNetworks runs f on every network the registry knows of.
-func (r *registry) WalkNetworks(f func(docker_client.Network)) {
+func (r *registry) WalkNetworks(f func(network.Summary)) {
 	r.RLock()
 	defer r.RUnlock()
 
-	for _, network := range r.networks {
-		f(network)
+	for _, n := range r.networks {
+		f(n)
 	}
 }

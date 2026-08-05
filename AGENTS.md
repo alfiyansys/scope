@@ -13,6 +13,14 @@ phase order and scope (0: CI baseline → 1: Go toolchain → 2: Docker client �
 3: Swarm validation → 4: eBPF → 5: Kubernetes → 6: cleanup); this file is
 just the rules that are easy to violate if you only read the code.
 
+There are **two** plan files, kept deliberately separate — check which one
+applies before starting: `MODERNIZATION-PLAN.md` tracks the codebase
+(phases above); `DEPLOYMENT-PLAN.md` tracks this fork actually **running**
+as standing infrastructure on the user's real Swarm cluster (image builds,
+which nodes run what, cross-host probe rollout) — a different, ongoing
+concern from modernizing the code. Don't fold deployment/ops tasks into
+`MODERNIZATION-PLAN.md`, or vice versa.
+
 ## Status
 
 Progress is tracked via checkboxes in `MODERNIZATION-PLAN.md` — trust that over this
@@ -145,6 +153,14 @@ Types: `feat`, `fix`, `refactor`, `docs`, `chore`, `test`, `style`.
 with formatting, refactors with features, or code with unrelated docs. Each
 commit should leave the project buildable. No empty commits, no generic
 messages. Never amend or rewrite pushed history unless asked.
+
+**No `Claude-Session:` trailer.** Commits may keep `Co-Authored-By: Claude
+Sonnet 5 <noreply@anthropic.com>`, but never add a `Claude-Session: <url>`
+line — omit it from the commit template entirely, don't just remember to
+strip it after the fact. The full existing history on `master` and `dev`
+had every `Claude-Session:` trailer removed via `git filter-repo` on
+2026-08-05 (rewrote every commit from `ff765b5b` onward, force-pushed both
+branches) — don't reintroduce what was deliberately removed.
 
 ## Auto-Commit Authorization
 

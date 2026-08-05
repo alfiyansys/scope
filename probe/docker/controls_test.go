@@ -46,7 +46,17 @@ func TestControls(t *testing.T) {
 
 type mockPipe struct{}
 
-func (mockPipe) Ends() (io.ReadWriter, io.ReadWriter)                        { return nil, nil }
+// nopReadWriter discards writes and reads as EOF immediately - a harmless
+// stand-in for the real pipe ends controls.go's attach/exec handlers pump
+// data through, since this test only cares about the control response shape.
+type nopReadWriter struct{}
+
+func (nopReadWriter) Read([]byte) (int, error)  { return 0, io.EOF }
+func (nopReadWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func (mockPipe) Ends() (io.ReadWriter, io.ReadWriter) {
+	return nopReadWriter{}, nopReadWriter{}
+}
 func (mockPipe) CopyToWebsocket(io.ReadWriter, xfer.Websocket) (bool, error) { return true, nil }
 func (mockPipe) Close() error                                                { return nil }
 func (mockPipe) Closed() bool                                                { return false }

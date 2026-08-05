@@ -1,0 +1,40 @@
+# Pragmatic single-stage deployment image for the sm-qohelet Swarm cluster,
+# built directly from a working tree that already has the client UI built
+# (client/build, client/build-external) and prog/staticui, prog/externalui
+# generated (see MODERNIZATION-PLAN.md Phase 2 for how - the client
+# toolchain itself is still the old ancient one, needs NODE_OPTIONS=
+# --openssl-legacy-provider; that's a separate future modernization item,
+# not redone here).
+#
+# Deliberately not docker/Dockerfile.scope: that one chains through
+# Dockerfile.cloud-agent -> weaveworks/cloud-agent (Alpine/musl, static
+# linking, bundled Weave Net binaries) which needs its own build path this
+# quick deployment doesn't exercise. Debian-slim runtime instead, matching
+# what the Go binary here actually links against (CGO-enabled: libpcap,
+# libnl, libdbus, libsystemd - needed for gopacket/tcptracer-bpf, which
+# don't build under CGO_ENABLED=0).
+FROM golang:1.25-bookworm AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends libpcap-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+ARG revision=dev
+RUN go build -tags 'netgo osusergo unsafe' \
+      -ldflags "-X main.version=${revision} -s -w" \
+      -o /out/scope ./prog
+
+FROM debian:bookworm-slim
+ARG revision=dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates libpcap0.8 conntrack iproute2 curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /out/scope /usr/bin/scope
+COPY docker/entrypoint-deploy.sh /usr/bin/entrypoint-deploy.sh
+RUN chmod +x /usr/bin/entrypoint-deploy.sh
+EXPOSE 4040
+ENTRYPOINT ["/usr/bin/entrypoint-deploy.sh"]
+
+LABEL maintainer="alfiyansys" \
+      org.opencontainers.image.title="scope (modernized fork)" \
+      org.opencontainers.image.source="https://github.com/alfiyansys/scope" \
+      org.opencontainers.image.revision="${revision}"

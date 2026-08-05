@@ -12,8 +12,8 @@ SCOPE_BACKEND_BUILD_UPTODATE=.scope_backend_build.uptodate
 SCOPE_VERSION=$(shell git rev-parse --short HEAD)
 GIT_REVISION=$(shell git rev-parse HEAD)
 WEAVENET_VERSION=2.8.1
-RUNSVINIT=vendor/github.com/peterbourgon/runsvinit/runsvinit
-CODECGEN_DIR=vendor/github.com/ugorji/go/codec/codecgen
+RUNSVINIT=bin/runsvinit
+CODECGEN_EXE_DIR=bin/codecgen
 CODECGEN_UID=0
 GET_CODECGEN_DEPS=$(shell find $(1) -maxdepth 1 -type f -name '*.go' -not -name '*_test.go' -not -name '*.codecgen.go' -not -name '*.generated.go')
 CODECGEN_TARGETS=report/report.codecgen.go render/detailed/detailed.codecgen.go
@@ -22,7 +22,10 @@ RUN_FLAGS=-ti
 BUILD_IN_CONTAINER=true
 GO_ENV=GOGC=off
 GO_BUILD_TAGS='netgo osusergo unsafe'
-GO_BUILD_FLAGS=-mod vendor -ldflags "-extldflags \"-static\" -X main.version=$(SCOPE_VERSION) -s -w" -tags $(GO_BUILD_TAGS)
+# No -mod vendor: this project builds from the module cache/go.sum, not a
+# committed vendor/ tree (dropped in Phase 2 of MODERNIZATION-PLAN.md - it
+# was churning heavily on every dependency bump).
+GO_BUILD_FLAGS=-ldflags "-extldflags \"-static\" -X main.version=$(SCOPE_VERSION) -s -w" -tags $(GO_BUILD_TAGS)
 
 ifeq ($(GOARCH),arm)
 GO_ENV+=CGO_ENABLED=1
@@ -71,8 +74,6 @@ $(CLOUD_AGENT_EXPORT): docker/Dockerfile.cloud-agent docker/$(SCOPE_EXE) docker/
 
 $(SCOPE_EXPORT): docker/Dockerfile.scope $(CLOUD_AGENT_EXPORT) docker/$(RUNSVINIT) docker/run-app docker/run-probe docker/entrypoint.sh
 
-$(RUNSVINIT): vendor/github.com/peterbourgon/runsvinit/*.go
-
 $(SCOPE_EXE): $(shell find ./ -path ./vendor -prune -o -type f -name '*.go') prog/staticui/staticui.go prog/externalui/externalui.go $(CODECGEN_TARGETS)
 
 report/report.codecgen.go: $(call GET_CODECGEN_DEPS,report/)
@@ -101,18 +102,19 @@ else
 $(SCOPE_EXE):
 	time $(GO) build $(GO_BUILD_FLAGS) -o $@ ./$(@D)
 
-CODECGEN_EXE=$(CODECGEN_DIR)/bin/codecgen_$(shell go env GOHOSTOS)_$(shell go env GOHOSTARCH)
+CODECGEN_EXE=$(CODECGEN_EXE_DIR)/codecgen_$(shell go env GOHOSTOS)_$(shell go env GOHOSTARCH)
 
 %.codecgen.go: $(CODECGEN_EXE)
 	rm -f $@; $(GO_HOST) build $(GO_BUILD_FLAGS) ./$(@D) # workaround for https://github.com/ugorji/go/issues/145
 	cd $(@D) && $(WITH_GO_HOST_ENV) GO111MODULE=off $(shell pwd)/$(CODECGEN_EXE) -d $(CODECGEN_UID) -rt $(GO_BUILD_TAGS) -u -o $(@F) $(notdir $(call GET_CODECGEN_DEPS,$(@D)))
 
-$(CODECGEN_EXE): $(CODECGEN_DIR)/*.go
+$(CODECGEN_EXE):
 	mkdir -p $(@D)
-	$(GO_HOST) build $(GO_BUILD_FLAGS) -o $@ ./$(CODECGEN_DIR)
+	$(GO_HOST) build $(GO_BUILD_FLAGS) -o $@ github.com/ugorji/go/codec/codecgen
 
 $(RUNSVINIT):
-	time $(GO) build $(GO_BUILD_FLAGS) -o $@ ./$(@D)
+	mkdir -p $(@D)
+	time $(GO) build $(GO_BUILD_FLAGS) -o $@ github.com/peterbourgon/runsvinit
 
 shell:
 	/bin/bash
@@ -125,11 +127,11 @@ lint: prog/staticui/staticui.go prog/externalui/externalui.go
 
 prog/staticui/staticui.go:
 	mkdir -p prog/staticui
-	$(NO_CROSS_COMP); go run -mod vendor github.com/mjibson/esc -o $@ -pkg staticui -prefix client/build client/build
+	$(NO_CROSS_COMP); go run github.com/mjibson/esc -o $@ -pkg staticui -prefix client/build client/build
 
 prog/externalui/externalui.go:
 	mkdir -p prog/externalui
-	$(NO_CROSS_COMP); go run -mod vendor github.com/mjibson/esc -o $@ -pkg externalui -prefix client/build-external -include '\.html$$' client/build-external
+	$(NO_CROSS_COMP); go run github.com/mjibson/esc -o $@ -pkg externalui -prefix client/build-external -include '\.html$$' client/build-external
 
 endif
 
@@ -227,10 +229,10 @@ clean:
 	$(GO) clean ./...
 	rm -rf $(SCOPE_EXPORT) $(SCOPE_UI_TOOLCHAIN_UPTODATE) $(SCOPE_BACKEND_BUILD_UPTODATE) \
 		$(SCOPE_EXE) $(RUNSVINIT) prog/staticui/staticui.go prog/externalui/externalui.go client/build/*.js client/build-external/*.js docker/weave .pkg \
-		$(CODECGEN_TARGETS) $(CODECGEN_DIR)/bin
+		$(CODECGEN_TARGETS) $(CODECGEN_EXE_DIR)
 
 clean-codecgen:
-	rm -rf $(CODECGEN_TARGETS) $(CODECGEN_DIR)/bin
+	rm -rf $(CODECGEN_TARGETS) $(CODECGEN_EXE_DIR)
 
 # clean + rmi
 #

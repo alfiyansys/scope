@@ -1,12 +1,13 @@
 package app_test
 
 import (
+	"context"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
-	fsouza "github.com/fsouza/go-dockerclient"
+	containertypes "github.com/docker/docker/api/types/container"
 
 	"github.com/weaveworks/scope/app"
 	"github.com/weaveworks/scope/test"
@@ -14,8 +15,8 @@ import (
 
 type mockDockerClient struct{}
 
-func (mockDockerClient) ListContainers(fsouza.ListContainersOptions) ([]fsouza.APIContainers, error) {
-	return []fsouza.APIContainers{
+func (mockDockerClient) ContainerList(context.Context, containertypes.ListOptions) ([]containertypes.Summary, error) {
+	return []containertypes.Summary{
 		{
 			Names: []string{"/" + containerName},
 			ID:    containerID,

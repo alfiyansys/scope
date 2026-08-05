@@ -309,7 +309,7 @@ func (c *appClient) publish(r io.Reader) error {
 	})
 	if resp.StatusCode != http.StatusOK {
 		text, _ := ioutil.ReadAll(resp.Body)
-		return fmt.Errorf(resp.Status + ": " + string(text))
+		return fmt.Errorf("%s: %s", resp.Status, string(text))
 	}
 	return nil
 }
