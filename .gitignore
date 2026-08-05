@@ -57,8 +57,11 @@ extras/copyreport/copyreport
 *npm-debug.log
 *yarn-error.log
 app/static.go
-vendor/github.com/ugorji/go/codec/codecgen/bin/*
 *.codecgen.go
+# Dropped in Phase 2 of MODERNIZATION-PLAN.md: build from the module
+# cache/go.sum instead of a committed vendor/ tree.
+/vendor/
+/bin/
 client/build-external/*
 prog/staticui/staticui.go
 prog/externalui/externalui.go
