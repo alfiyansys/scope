@@ -17,8 +17,9 @@ creation.
 | Piece | State |
 |---|---|
 | Central app (`scope_app` on the manager) | **Live** — deployed, verified in browser |
-| Per-node probe agents (global service) | **Live** — `scope_probe` global service on all 3 worker nodes, `sm-qohelet` covered by `scope_app`'s bundled probe |
-| Cross-host communication graph | Mechanism confirmed working (all 4 hosts visible, cross-host adjacency observed for Scope's own probe→app traffic) — an edge between any two *application* containers only appears when real traffic is flowing between them at that moment, which is expected behavior, not a gap |
+| Per-node probe agents (Swarm global service) | **Live** — `scope_probe` on all 3 worker nodes, `sm-qohelet` covered by `scope_app`'s bundled probe |
+| Supplementary host-networked probes (Stage 3) | **Live** — `scope-host-probe` (plain `docker run`, not Swarm-managed) on all 4 nodes, for real cross-container traffic visibility Swarm services can't provide |
+| Cross-host communication graph | **Confirmed with real traffic** — e.g. `traefik` ↔ `dvr-window` visible as a live cross-node edge, not just Scope's own internal traffic |
 
 ## Stage 1 — Central app on the manager (done)
 
@@ -48,8 +49,32 @@ creation.
 
 Did add what Swarm *does* support — `--cap-add NET_ADMIN NET_RAW SYS_ADMIN SYS_RESOURCE` on both `scope_app` and `scope_probe` — which fixed the constant `conntrack Follow error: operation not permitted` log spam and roughly quintupled tracked endpoints (10 → 48), but all still within `scope_net`. Real, measurable improvement in tracking permission errors, not in cross-service visibility, since that's blocked by network namespace isolation, not permissions.
 
-**Decision (asked, confirmed 2026-08-05):** keep this as a proper Swarm service — correct per-node inventory (containers/hosts/services), managed by Swarm (auto-restart, `docker service ls`, rolling updates), accepting no deep cross-container traffic graph. The alternative (plain `docker run --net=host --pid=host --privileged --restart=always` per node, outside Swarm's management) was considered and explicitly declined in favor of staying Swarm-managed.
+**Decision (asked, initially confirmed 2026-08-05):** keep this as a proper Swarm service, accepting no deep cross-container traffic graph. **Revisited same session** — the user asked directly whether there was *any* way to still see real traffic (specifically `traefik` → `dvr-window`); see Stage 3 below.
 
 **Not done / deliberately deferred:** image distribution still has no registry (still `save`/`load` per node — fine at 4 nodes, won't scale much further); the `Dockerfile.scope`-vs-`Dockerfile.deploy` base-image decision from Stage 1 is still open.
 
-**Definition of Done:** met, with the limitation above understood and deliberately accepted rather than silently present. Every node in the cluster runs a probe reporting to the central `scope_app`; the UI shows all 4 real hosts with correctly-attributed containers. Cross-host correlation *between scope's own probes* is confirmed working end-to-end; a real cross-service application traffic graph is out of reach for a pure Swarm-service deployment and was a known tradeoff going in, not a bug to chase further.
+**Definition of Done:** met. Every node in the cluster runs a probe reporting to the central `scope_app`; the UI shows all 4 real hosts with correctly-attributed containers. Cross-host correlation *between scope's own probes* was confirmed working end-to-end at this stage; real cross-service application traffic came from Stage 3, not this one.
+
+## Stage 3 — Supplementary host-networked probes (done)
+
+**Why:** Stage 2 confirmed the Swarm-service ceiling is real (no `--net=host`/`--pid=host`/`--privileged` for services, ever). Rather than abandon the Swarm-managed deployment to work around it, added a second, *additive* probe per node that isn't Swarm-managed — the Swarm services from Stages 1–2 are untouched.
+
+**What's deployed:** one extra container per node (all 4, including `sm-qohelet` this time — its Swarm-managed probe has the same namespace limitation as the others), named `scope-host-probe`, started via plain `docker run`, not a Swarm service:
+
+```bash
+docker run -d --name scope-host-probe --restart=always \
+  --net=host --pid=host --privileged \
+  --entrypoint /usr/bin/scope \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  alfiyansys/scope:modernized-8f6b5774 \
+  --mode=probe --probe.docker=true --weave=false --no-app \
+  --probe.log.prefix='<hostprobe>' 127.0.0.1:4040
+```
+
+Two things made this work cleanly:
+- **`127.0.0.1:4040` as the target, not `scope_app:4040`.** A host-networked container isn't on `scope_net` and can't resolve Swarm service-name DNS. Instead it relies on Swarm's **routing mesh**: `scope_app`'s port was published in default `ingress` mode, so *every* node — including ones that don't run the `scope_app` task — routes local `:4040` traffic to a live instance. Verified this directly (`curl 127.0.0.1:4040/api` returned `HTTP 200` from `sw-david01` and `vanguard`, neither of which run `scope_app`) before relying on it.
+- **`--restart=always`, not Swarm-managed.** This is a real gap: unlike the Swarm services, nothing currently guarantees these containers survive a node reboot beyond Docker's own restart policy (which does persist across reboots if the Docker daemon itself is enabled at boot, but there's no `docker service ls` visibility or rolling-update story for these). Acceptable for now; a systemd unit or equivalent per node would close this if it matters later.
+
+**Validated:** immediately eliminated the `conntrack Follow error: operation not permitted` spam (host+pid namespace access is what conntrack actually needs, not just capabilities). Endpoint count went from the Stage 2 ceiling straight to 771 total / 524 non-scope-internal adjacencies — real BitTorrent/VPN/RTSP/Swarm-gossip traffic, not just probe↔app noise. Confirmed the specific thing that prompted this: clicked `traefik_traefik.1` in the UI and it shows a direct, live edge to `dvr-window_dvr-window.1` on `sw-david01` — cross-node, cross-service, real traffic, screenshotted.
+
+**Definition of Done:** met. Real application-level cross-container/cross-host traffic (the `traefik` ↔ `dvr-window` case specifically) is now visible in the UI, without removing or replacing anything from Stages 1–2.
