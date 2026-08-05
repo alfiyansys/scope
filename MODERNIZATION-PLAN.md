@@ -22,6 +22,19 @@ and **Definition of Done** (how you know the phase is finished, not just attempt
 | CI | none | CircleCI config was deleted in the deprecation commit |
 | Base image | `weaveworks/cloud-agent` (`docker/Dockerfile.scope`) | unmaintained upstream base |
 
+## This work vs. upstream `CONTRIBUTING.md`
+
+Checked once the fork's workflow (`AGENTS.md`) had settled, to make sure the two don't quietly conflict.
+
+**Fits the spirit:** logical, self-contained commits; tests added/fixed for every changed file; commit bodies explain *why*, matching `CONTRIBUTING.md`'s "what + why" goal even where the exact format differs.
+
+**Deliberate deviations (all already established in `AGENTS.md`, not accidental drift):**
+- Branch base: `CONTRIBUTING.md` says branch from `master`; this fork branches from `dev`. It's not tracking upstream PRs — it has its own `master`(protected)→`dev`→`phase-N` flow.
+- Commit format: `CONTRIBUTING.md` wants `<subsystem>: <what>` / blank / `<why>`; this fork uses Conventional Commits (`feat(docker): ...`). Same information, different convention.
+- Build/test commands: `CONTRIBUTING.md` says `make && ./scope launch` / `make tests`. This fork runs `go build`/`go test` directly and hand-builds the client — because the containerized `make` pipeline (Node 10.19, the missing codegen step) is exactly what's being fixed here and doesn't fully work yet.
+
+**Known follow-up, not urgent:** `CONTRIBUTING.md` itself is stale against where the repo actually is (no `vendor/`, `make`'s toolchain still partly broken). Worth a doc pass once the build path fully stabilizes (candidate for Phase 6), not before.
+
 ---
 
 ## Phase 0 — CI safety net
