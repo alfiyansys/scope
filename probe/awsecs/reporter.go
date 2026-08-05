@@ -161,7 +161,7 @@ func (r Reporter) Tag(rpt report.Report) (report.Report, error) {
 				ServiceDesiredCount:   fmt.Sprintf("%d", service.DesiredCount),
 				ServiceRunningCount:   fmt.Sprintf("%d", service.RunningCount),
 				report.ControlProbeID: r.probeID,
-			}).WithLatestActiveControls(activeControls...))
+			}).WithTopology(report.ECSService).WithLatestActiveControls(activeControls...))
 		}
 		log.Debugf("Created %v ECS service nodes", len(ecsInfo.Services))
 
@@ -178,7 +178,7 @@ func (r Reporter) Tag(rpt report.Report) (report.Report, error) {
 				TaskFamily: info.Family,
 				Cluster:    cluster,
 				CreatedAt:  task.CreatedAt.Format(time.RFC3339Nano),
-			})
+			}).WithTopology(report.ECSTask)
 			rpt.ECSTask.AddNode(node)
 
 			// parents sets to merge into all matching container nodes

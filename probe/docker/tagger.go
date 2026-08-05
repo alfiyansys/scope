@@ -71,7 +71,7 @@ func (t *Tagger) Tag(r report.Report) (report.Report, error) {
 		node := report.MakeNodeWith(nodeID, map[string]string{
 			ServiceName:    serviceName,
 			StackNamespace: stackNamespace,
-		})
+		}).WithTopology(report.SwarmService)
 		r.SwarmService.AddNode(node)
 
 		r.Container.Nodes[containerID] = container.WithParent(report.SwarmService, nodeID)
