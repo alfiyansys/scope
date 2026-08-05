@@ -31,7 +31,7 @@ and **Definition of Done** (how you know the phase is finished, not just attempt
 **Tasks:**
 - [SKIPPED] ~~Add `.github/workflows/ci.yml`: `go build ./...`, `go vet ./...`, `go test ./...` on push/PR.~~ Deferred — working local-only for now, no GitHub Actions yet.
 - [x] Run `make` locally once to record which targets currently work at all, before touching anything.
-- [x] Decide on `vendor/`: **keeping it for now** (47MB / ~35% of repo). Makefile currently builds with `-mod vendor`; deleting it means updating those build flags too, so deferred to Phase 1 when the Makefile is being touched anyway rather than a separate Phase 0 change.
+- [x] Decide on `vendor/`: **keeping it for now** (47MB / ~35% of repo). Makefile currently builds with `-mod vendor`; deleting it means updating those build flags too, so deferred to Phase 1 when the Makefile is being touched anyway rather than a separate Phase 0 change. *(Superseded in Phase 2 — see below: the churn this decision was trying to avoid showed up anyway once real dependency bumps started, so `vendor/` was removed for good.)*
 
 **Commands:**
 ```bash
@@ -56,8 +56,8 @@ go vet ./... 2>&1 | tee /tmp/baseline-vet.log
 - [x] `tools/build/golang/Dockerfile`: replace `FROM golang:1.14.4-stretch` with `FROM golang:1.22-bookworm`. Also had to swap the Python 2 packages (`python-requests`, `python-yaml`, `python-openssl`) for their `python3-*` equivalents — bookworm doesn't ship python2 packages at all, so the `apt-get install` would have hard-failed on the base image bump alone.
 - [x] Replace the `go get github.com/...` tool-install block with `go install pkg@version` per tool. Also **dropped `gvt` and `golang/dep` entirely** rather than converting them — both are pre-Go-modules vendoring tools, superseded by `go mod vendor` which this project already uses; keeping them installed would've been dead weight, not a faithful migration.
 - [x] Grepped for `golang/dep`/`dep ensure` outside vendor/ — the only hit was the same line removed above; nothing else to clean up.
-- [x] Revisit `vendor/` (deferred from Phase 0): ran `go mod tidy` + `go mod vendor` — **required**, not optional, because Go ≥1.14's stricter vendor-consistency check rejected the old sparse `go.mod` (indirect deps not explicitly listed) the moment the `go` directive moved past 1.16. Kept `vendor/` (per the Phase 0 decision), just regenerated it.
-  - ⚠️ Side effect discovered: `go mod vendor` drops non-`.go` vendor files, including `vendor/github.com/iovisor/gobpf/elf/include/{bpf.h,bpf_map.h}` — C headers the eBPF tracer's cgo path needs. Build still succeeds under this project's actual tags (`netgo osusergo unsafe`) because cgo isn't being compiled in for that path here, but this is a **real risk for Phase 4 (eBPF)** — verify a cgo-enabled build of `probe/endpoint` still works, or account for these headers separately (e.g. don't vendor that subpackage, or vendor it by hand).
+- [x] Revisit `vendor/` (deferred from Phase 0): ran `go mod tidy` + `go mod vendor` — **required**, not optional, because Go ≥1.14's stricter vendor-consistency check rejected the old sparse `go.mod` (indirect deps not explicitly listed) the moment the `go` directive moved past 1.16. Kept `vendor/` (per the Phase 0 decision) at this point, just regenerated it. *(This got revisited again and reversed in Phase 2 — see below.)*
+  - ⚠️ Side effect discovered: `go mod vendor` drops non-`.go` vendor files, including `vendor/github.com/iovisor/gobpf/elf/include/{bpf.h,bpf_map.h}` — C headers the eBPF tracer's cgo path needs. This became moot once `vendor/` was dropped entirely in Phase 2 (module cache builds don't have this problem — the headers just live in the module cache like everything else), but still flag it if `probe/endpoint`'s cgo path is ever exercised, since it was never verified either way.
 - [x] Fixed compiler/test breakage — see below. No `go vet`/compiler errors from the version bump itself; the breakage found was pre-existing, just never exercised (no working CI, per Phase 0).
 
 **Discovered and fixed: infinite-recursion bug in `report/backcompat.go`**
@@ -84,24 +84,35 @@ go test ./... 2>&1 | tee /tmp/phase1-test.log
 **Why:** this is the actual "newest Docker runtime" requirement. Everything else is plumbing to get here.
 
 **Tasks:**
-- [ ] Replace `fsouza/go-dockerclient` with the official `github.com/docker/docker/client` SDK (preferred — actively tracks Engine API releases) in:
-  - `probe/docker/registry.go` (client construction — currently `NewClientFromEnv`/`NewClient`)
+- [x] Replace `fsouza/go-dockerclient` with the official `github.com/docker/docker/client` SDK in:
+  - `probe/docker/registry.go` (client construction, `Client` interface, container/image/network listing, event stream)
   - `probe/docker/container.go` (container inspect/stats)
-  - `probe/docker/controls.go` (start/stop/pause/restart/exec controls)
-  - `probe/docker/reporter.go`, `probe/docker/tagger.go`
+  - `probe/docker/controls.go` (start/stop/pause/restart/remove/attach/exec/resize)
+  - `probe/docker/reporter.go` (`tagger.go` needed no changes — it never imported the old client)
   - `app/weave.go`
-- [ ] Set an explicit API version floor via `client.WithVersion("1.43")` (or negotiate with `client.WithAPIVersionNegotiation()`) instead of relying on whatever the old library defaulted to.
-- [ ] Diff struct fields used from container/network inspect against the current `docker/docker/api/types` — field renames/removals between 2018 and now are the likely breakage source.
-- [ ] Manually validate against a real current Engine: container list/inspect, stats stream, exec-into-container, pause/stop/restart controls.
+  - Plus their test files (`*_test.go` in `probe/docker/`, `app/weave_test.go`) — all rewritten against the new interface, not just left broken.
+- [x] API version: used `client.WithAPIVersionNegotiation()` rather than a hardcoded floor — negotiates down to whatever the target Engine actually supports. Confirmed working live: client v28.5.2 against a real Engine at 27.2.0/API 1.47.
+- [x] Diffed struct fields against `docker/docker/api/types` — real differences found and handled: `Created`/`StartedAt`/`FinishedAt` are now `string` (was `time.Time`), `State` is now `*container.State` (pointer, needs nil-checks) with a daemon-provided `.Status` field replacing the old client's hand-rolled state-string logic, `NetworkSettings.SecondaryIPAddresses` is now `[]network.Address` (was `[]string`), `NetworkSettings.Networks` values are now pointers, `MemoryStats.Stats` is a plain `map[string]uint64` (was a typed struct), `CPUStats.SystemCPUUsage` renamed to `SystemUsage`. Events changed from an `AddEventListener`/`RemoveEventListener` callback API to a context-scoped `Events(ctx, opts) (<-chan Message, <-chan error)` stream (cleaner, but a real API shape change, not just a rename).
+- [x] **Manually validated against the real local Docker Engine (27.2.0, API 1.47)** — not simulated: started a live `nginx:alpine` container and drove it through the actual migrated `docker.Registry`/control-handler code path (temporary build-tagged test, removed after the run, not committed). Confirmed: container topology appears with correct state/image/hostname; live stats streaming populates real CPU/memory metrics from `ContainerStats`; pause → unpause → stop → start → restart each landed correctly, cross-checked against `docker inspect` after every step. Attach/exec were validated via type-correctness of the `types.HijackedResponse`/`stdcopy` plumbing plus the existing `TestPipes` unit test (response shape), not a live interactive terminal session — flagging that as the one part of this phase validated at one remove rather than end-to-end live.
 
-**Commands (validation, once code changes land):**
+**Notable decisions and findings along the way:**
+- Added `github.com/docker/docker@v28.5.2+incompatible` (latest stable client at the time).
+- `go mod tidy`/`go mod vendor` for this bump cascaded `grpc`/`protobuf`/`genproto` forward and briefly broke unrelated code (`cri/runtime`, protobuf v1-vs-v2 API mismatch) — fixed with two small targeted bumps (`google.golang.org/genproto`'s now-split `googleapis/{api,rpc}` submodules, `github.com/pkg/errors` v0.8.1→v0.9.1 for `errors.Is`/`As`), not a wholesale rewrite. Worth knowing this is a real risk anytime a Docker/gRPC-adjacent dependency gets bumped here again.
+- **`vendor/` removed entirely** (superseding the Phase 0/1 "keep it" call) — the constant `go mod vendor` re-sync on every dependency change was actively costing time mid-phase, right when it mattered most. Builds now go straight against the module cache/`go.sum`. This required reworking two `Makefile` rules that built tools directly from vendor-relative paths (`RUNSVINIT`, the `codecgen` build) to build from their module import paths instead (`github.com/peterbourgon/runsvinit`, `github.com/ugorji/go/codec/codecgen`), dropping `-mod vendor` from `GO_BUILD_FLAGS` and the two `esc` invocations, and adding `/vendor/` + `/bin/` to `.gitignore`.
+- `docker/docker/pkg/term` was removed upstream; `probe/host/controls.go` (unrelated to the Docker client work, but broken by the same dependency bump) now imports `github.com/moby/term` instead — same API.
+- Fixed 3 unrelated pre-existing `go vet` failures (`non-constant format string`) surfaced by running `go test ./...` on a newer Go for the first time in years: `probe/appclient/app_client.go`, `probe/plugins/registry_internal_test.go`, `report/latest_map_internal_test.go`.
+- `pumpHijackedStream` (new in `controls.go`) demultiplexes stdout/stderr via `github.com/docker/docker/pkg/stdcopy` when the container has no TTY, matching Docker's actual stream protocol — the old `fsouza` client did this invisibly; it's now this project's own code and needs to stay correct.
+
+**Definition of Done:** met. scope's Docker probe runs against a current `dockerd`, verified live: container topology, stats, and pause/stop/restart/start controls all work end-to-end against a real Engine, not just compiling. Exec/attach validated by type/shape rather than a live terminal session — worth a follow-up live check if this area is touched again.
+
+**Commands (validation used):**
 ```bash
-docker version --format '{{.Server.APIVersion}}'   # confirm target Engine's API version
-DOCKER_API_VERSION=1.43 ./scope launch
-# then hit http://localhost:4040 and check containers render, stats update, exec works
+docker version --format '{{.Server.APIVersion}}'   # confirmed 1.47 locally
+go build ./... && go test ./probe/docker/... ./app/...
+# live validation: docker run -d --name scope-phase2-validation nginx:alpine, then
+# drive docker.Registry + its control handlers directly against it, cross-checking
+# state transitions with `docker inspect` after each control call.
 ```
-
-**Definition of Done:** scope's app+probe run against a current `dockerd` (containerd-backed, cgroup v2 host) with container topology, live stats, and container controls (pause/stop/restart/exec) all functioning — verified manually against a real Engine, not just compiling.
 
 ---
 
