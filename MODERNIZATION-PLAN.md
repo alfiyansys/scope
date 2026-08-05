@@ -141,21 +141,30 @@ go build ./... && go test ./probe/docker/... ./app/...
 **Why:** Swarm plumbing already exists (it is *not* missing) — this phase validates/repairs it now that Phase 2 modernized the client underneath it.
 
 **Tasks:**
-- [ ] Stand up a local Swarm (`docker swarm init`), deploy a small multi-service stack.
-- [ ] Verify `probe/docker/reporter.go`/`tagger.go` still correctly populate `report.SwarmService` nodes against current `ServiceList`/`TaskList` API responses (field additions since 2018 are additive/safe, but confirm nothing was renamed).
-- [ ] Verify `render/swarm.go`'s `SwarmServiceRenderer` produces correct topology across current task states (Swarm has added states like `remove`, rolling-update fields).
-- [ ] Check `report/report.go` / `report/id.go` for whether a Swarm **node** (manager/worker) topology exists; if not, scope it as a follow-up rather than blocking this phase on it.
-- [ ] Add a repeatable integration check under `integration/` that stands up Swarm and asserts the probe reports services — this path has had zero live testing in years and needs a regression guard going forward.
+- [x] Stand up a Swarm and deploy a small multi-service stack. Used an already-established real 4-node Swarm cluster (`sm-qohelet.local`, manager, reachable over SSH) rather than a throwaway `docker swarm init` — this machine (`daya-regia.invis`) turned out to already be a worker node in it. Deployed one small disposable 2-replica `nginx:alpine` service for validation, removed afterward; never touched the cluster's existing real workloads (`dvr-window`, `odoo-tune`, `traefik`, `portainer`).
+- [x] Verify `probe/docker/tagger.go` still correctly populates `report.SwarmService` nodes — it does; confirmed it's entirely container-label-based (`com.docker.swarm.service.{id,name}`, `com.docker.stack.namespace`), no `ServiceList`/`TaskList` Swarm API calls at all, so it works fine from a worker node with no manager access.
+- [x] Verify `render/swarm.go`'s `SwarmServiceRenderer` produces correct topology — it does, once the real bug below (found *while* verifying this) was fixed.
+- [x] Checked for a Swarm **node** (manager/worker) topology: doesn't exist, only `report.SwarmService` (`report/id.go`, `report/report.go`). Per this task's own instruction, scoping as a follow-up rather than building it now — out of scope for "validate existing plumbing."
+- [x] Added a repeatable check: `integration/swarm-live-validation.sh` (deliberately **not** named `*_test.sh`, so `tools/integration/run_all.sh`'s GCE/Vagrant-provisioned suite doesn't try to pick it up — that harness needs infrastructure this repo doesn't have configured, and per `CONTRIBUTING.md` is already hard to set up even for maintainers). Instead validates against any existing Swarm reachable over SSH, with a scope app+probe already running against a member node's Docker daemon. Deploys a disposable service, polls for it in the topology API, cleans up. Ran it for real — passes.
+
+**Found and fixed: a real, previously-invisible bug — `probe/docker/tagger.go` (and, same pattern, `probe/awsecs/reporter.go`)**
+
+`/api/topology/swarm-services` returned `{"nodes":{}}` even though the underlying report correctly had all 3 services (confirmed via `/api/report`). Every individual layer of the render pipeline — `SwarmServiceRenderer`, the `FilterUnconnectedPseudo` transform, `detailed.Summaries`, even the final JSON encode — worked perfectly when replicated by hand in a throwaway Go test against the exact same live report. The live HTTP endpoint alone was empty.
+
+Root cause, confirmed by temporarily adding debug logging directly into the running binary: `app/api_topologies.go`'s handler calls `rpt.UnsafeRemovePartMergedNodes(ctx)` before rendering, which drops any node where `Node.isPartMerged()` — defined as `Topology == ""` — is true (`report/node.go`). `report.Topology.AddNode()` never sets `Node.Topology`; only `Node.WithTopology(...)` does, and callers are expected to chain it themselves. `tagger.go`'s dynamic Swarm-service node construction (`report.MakeNodeWith(nodeID, ...); r.SwarmService.AddNode(node)`) never called `.WithTopology(...)`, so every SwarmService node ever created had `Topology == ""` and got silently stripped by the very next line of code that ran after rendering. This has nothing to do with Phase 1/2's work — it's a long-standing, independent gap that just happened to be the first time anyone exercised this exact path against real, changing Swarm data.
+
+Grepped for the same shape elsewhere (`report.MakeNodeWith(...).AddNode(...)` without `.WithTopology(...)`) and found the identical bug in `probe/awsecs/reporter.go`, for both `ECSService` and `ECSTask` nodes — fixed both while here, same one-line pattern (`.WithTopology(report.ECSService)` / `.WithTopology(report.ECSTask)`).
+
+Confirmed live in the browser: the "Services" nav tab — completely absent before the fix, since `HideIfEmpty` had nothing to show — now appears and correctly renders all 3 real services (`dvr-window`, `agent`/portainer, plus the disposable test service) with working stack-namespace filters.
 
 **Commands:**
 ```bash
-docker swarm init
-docker service create --name web --replicas 3 nginx:alpine
-# then confirm scope's UI/API shows the swarm service topology
+# against an existing Swarm cluster reachable over SSH:
+SWARM_MANAGER_HOST=<manager-host> ./integration/swarm-live-validation.sh
 curl -s http://localhost:4040/api/topology/swarm-services | jq .
 ```
 
-**Definition of Done:** a live 3-node (or single-node dev) Swarm cluster with at least 2 services shows correct service topology in scope's UI, and an automated integration check codifies this so it doesn't silently rot again.
+**Definition of Done:** met. A live 4-node Swarm cluster with 3 real services (plus a disposable 4th used for validation) shows correct service topology in scope's UI and API, confirmed via screenshot. `integration/swarm-live-validation.sh` codifies the check so this doesn't silently regress again — it's a real, runnable script, not just a plan bullet.
 
 ---
 
