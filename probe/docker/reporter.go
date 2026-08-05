@@ -4,8 +4,9 @@ import (
 	"net"
 	"strings"
 
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
 	humanize "github.com/dustin/go-humanize"
-	docker_client "github.com/fsouza/go-dockerclient"
 
 	"github.com/weaveworks/scope/probe"
 	"github.com/weaveworks/scope/report"
@@ -276,21 +277,21 @@ func (r *Reporter) containerImageTopology() report.Topology {
 		WithMetadataTemplates(ContainerImageMetadataTemplates).
 		WithTableTemplates(ContainerImageTableTemplates)
 
-	r.registry.WalkImages(func(image docker_client.APIImages) {
-		imageID := trimImageID(image.ID)
+	r.registry.WalkImages(func(img image.Summary) {
+		imageID := trimImageID(img.ID)
 		latests := map[string]string{
 			ImageID:          imageID,
-			ImageSize:        humanize.Bytes(uint64(image.Size)),
-			ImageVirtualSize: humanize.Bytes(uint64(image.VirtualSize)),
+			ImageSize:        humanize.Bytes(uint64(img.Size)),
+			ImageVirtualSize: humanize.Bytes(uint64(img.VirtualSize)),
 		}
-		if len(image.RepoTags) > 0 {
-			imageFullName := image.RepoTags[0]
+		if len(img.RepoTags) > 0 {
+			imageFullName := img.RepoTags[0]
 			latests[ImageName] = ImageNameWithoutTag(imageFullName)
 			latests[ImageTag] = ImageNameTag(imageFullName)
 		}
 		nodeID := report.MakeContainerImageNodeID(imageID)
 		node := report.MakeNodeWith(nodeID, latests)
-		node = node.AddPrefixPropertyList(ImageLabelPrefix, image.Labels)
+		node = node.AddPrefixPropertyList(ImageLabelPrefix, img.Labels)
 		result.AddNode(node)
 	})
 
@@ -299,8 +300,8 @@ func (r *Reporter) containerImageTopology() report.Topology {
 
 func (r *Reporter) overlayTopology() report.Topology {
 	subnets := []string{}
-	r.registry.WalkNetworks(func(network docker_client.Network) {
-		for _, config := range network.IPAM.Config {
+	r.registry.WalkNetworks(func(n network.Summary) {
+		for _, config := range n.IPAM.Config {
 			subnets = append(subnets, config.Subnet)
 		}
 

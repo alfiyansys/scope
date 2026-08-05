@@ -1,6 +1,8 @@
 package docker
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -9,7 +11,8 @@ import (
 	"sync"
 	"time"
 
-	docker "github.com/fsouza/go-dockerclient"
+	containertypes "github.com/docker/docker/api/types/container"
+	units "github.com/docker/go-units"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/weaveworks/common/mtime"
@@ -41,12 +44,12 @@ const (
 
 // StatsGatherer gathers container stats
 type StatsGatherer interface {
-	Stats(docker.StatsOptions) error
+	ContainerStats(ctx context.Context, containerID string, stream bool) (containertypes.StatsResponseReader, error)
 }
 
 // Container represents a Docker container
 type Container interface {
-	UpdateState(*docker.Container)
+	UpdateState(*containertypes.InspectResponse)
 
 	ID() string
 	Image() string
@@ -56,7 +59,7 @@ type Container interface {
 	State() string
 	StateString() string
 	HasTTY() bool
-	Container() *docker.Container
+	Container() *containertypes.InspectResponse
 	StartGatheringStats(StatsGatherer) error
 	StopGatheringStats()
 	NetworkMode() (string, bool)
@@ -65,10 +68,10 @@ type Container interface {
 
 type container struct {
 	sync.RWMutex
-	container              *docker.Container
+	container              *containertypes.InspectResponse
 	stopStats              chan<- bool
-	latestStats            docker.Stats
-	pendingStats           [60]docker.Stats
+	latestStats            containertypes.StatsResponse
+	pendingStats           [60]containertypes.StatsResponse
 	numPending             int
 	hostID                 string
 	baseNode               report.Node
@@ -77,7 +80,7 @@ type container struct {
 }
 
 // NewContainer creates a new Container
-func NewContainer(c *docker.Container, hostID string, noCommandLineArguments bool, noEnvironmentVariables bool) Container {
+func NewContainer(c *containertypes.InspectResponse, hostID string, noCommandLineArguments bool, noEnvironmentVariables bool) Container {
 	result := &container{
 		container:              c,
 		hostID:                 hostID,
@@ -88,7 +91,7 @@ func NewContainer(c *docker.Container, hostID string, noCommandLineArguments boo
 	return result
 }
 
-func (c *container) UpdateState(container *docker.Container) {
+func (c *container) UpdateState(container *containertypes.InspectResponse) {
 	c.Lock()
 	defer c.Unlock()
 	c.container = container
@@ -103,6 +106,9 @@ func (c *container) Image() string {
 }
 
 func (c *container) PID() int {
+	if c.container.State == nil {
+		return 0
+	}
 	return c.container.State.Pid
 }
 
@@ -119,15 +125,54 @@ func (c *container) HasTTY() bool {
 	return c.container.Config.Tty
 }
 
+// humanState returns a human-readable summary of the container's state,
+// matching what `docker ps` and the old fsouza client's State.String() showed.
+func humanState(s *containertypes.State) string {
+	if s == nil {
+		return ""
+	}
+	startedAt, _ := time.Parse(time.RFC3339Nano, s.StartedAt)
+	finishedAt, _ := time.Parse(time.RFC3339Nano, s.FinishedAt)
+
+	if s.Running {
+		if s.Paused {
+			return fmt.Sprintf("Up %s (Paused)", units.HumanDuration(time.Now().UTC().Sub(startedAt)))
+		}
+		if s.Restarting {
+			return fmt.Sprintf("Restarting (%d) %s ago", s.ExitCode, units.HumanDuration(time.Now().UTC().Sub(finishedAt)))
+		}
+		return fmt.Sprintf("Up %s", units.HumanDuration(time.Now().UTC().Sub(startedAt)))
+	}
+
+	if s.Dead {
+		return "Dead"
+	}
+
+	if startedAt.IsZero() {
+		return "Created"
+	}
+
+	if finishedAt.IsZero() {
+		return ""
+	}
+
+	return fmt.Sprintf("Exited (%d) %s ago", s.ExitCode, units.HumanDuration(time.Now().UTC().Sub(finishedAt)))
+}
+
 func (c *container) State() string {
-	return c.container.State.String()
+	return humanState(c.container.State)
 }
 
 func (c *container) StateString() string {
-	return c.container.State.StateString()
+	if c.container.State == nil {
+		return ""
+	}
+	// Status is already one of "created"/"running"/"paused"/"restarting"/
+	// "removing"/"exited"/"dead", matching report.State* constants.
+	return c.container.State.Status
 }
 
-func (c *container) Container() *docker.Container {
+func (c *container) Container() *containertypes.InspectResponse {
 	return c.container
 }
 
@@ -141,30 +186,39 @@ func (c *container) StartGatheringStats(client StatsGatherer) error {
 	done := make(chan bool)
 	c.stopStats = done
 
-	stats := make(chan *docker.Stats)
-	opts := docker.StatsOptions{
-		ID:     c.container.ID,
-		Stats:  stats,
-		Stream: true,
-		Done:   done,
-	}
-
 	log.Debugf("docker container: collecting stats for %s", c.container.ID)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		if err := client.Stats(opts); err != nil && err != io.EOF && err != io.ErrClosedPipe {
-			log.Errorf("docker container: error collecting stats for %s: %v", c.container.ID, err)
-		}
+		<-done
+		cancel()
 	}()
 
 	go func() {
-		for s := range stats {
+		reader, err := client.ContainerStats(ctx, c.container.ID, true)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Errorf("docker container: error collecting stats for %s: %v", c.container.ID, err)
+			}
+			return
+		}
+		defer reader.Body.Close()
+
+		decoder := json.NewDecoder(reader.Body)
+		for {
+			var s containertypes.StatsResponse
+			if err := decoder.Decode(&s); err != nil {
+				if err != io.EOF && err != io.ErrClosedPipe && ctx.Err() == nil {
+					log.Errorf("docker container: error decoding stats for %s: %v", c.container.ID, err)
+				}
+				break
+			}
 			c.Lock()
 			if c.numPending >= len(c.pendingStats) {
 				log.Warnf("docker container: dropping stats for %s", c.container.ID)
 			} else {
-				c.latestStats = *s
-				c.pendingStats[c.numPending] = *s
+				c.latestStats = s
+				c.pendingStats[c.numPending] = s
 				c.numPending++
 			}
 			c.Unlock()
@@ -221,7 +275,7 @@ func (c *container) NetworkMode() (string, bool) {
 	c.RLock()
 	defer c.RUnlock()
 	if c.container.HostConfig != nil {
-		return c.container.HostConfig.NetworkMode, true
+		return string(c.container.HostConfig.NetworkMode), true
 	}
 	return "", false
 }
@@ -238,12 +292,15 @@ func (c *container) NetworkInfo(localAddrs []net.IP) report.Sets {
 	c.RLock()
 	defer c.RUnlock()
 
-	ips := c.container.NetworkSettings.SecondaryIPAddresses
+	ips := []string{}
+	for _, addr := range c.container.NetworkSettings.SecondaryIPAddresses {
+		ips = append(ips, addr.Addr)
+	}
 	if c.container.NetworkSettings.IPAddress != "" {
 		ips = append(ips, c.container.NetworkSettings.IPAddress)
 	}
 
-	if c.container.State.Running && c.container.State.Pid != 0 {
+	if c.container.State != nil && c.container.State.Running && c.container.State.Pid != 0 {
 		// Fetch IP addresses from the container's namespace
 		cidrs, err := namespaceIPAddresses(c.container.State.Pid)
 		if err != nil {
@@ -262,7 +319,7 @@ func (c *container) NetworkInfo(localAddrs []net.IP) report.Sets {
 	// here, and provide foreign key links from nodes to networks.
 	networks := make([]string, 0, len(c.container.NetworkSettings.Networks))
 	for name, settings := range c.container.NetworkSettings.Networks {
-		if name == "none" {
+		if name == "none" || settings == nil {
 			continue
 		}
 		networks = append(networks, name)
@@ -300,7 +357,7 @@ func (c *container) NetworkInfo(localAddrs []net.IP) report.Sets {
 	return s
 }
 
-func (c *container) memoryUsageMetric(stats []docker.Stats) report.Metric {
+func (c *container) memoryUsageMetric(stats []containertypes.StatsResponse) report.Metric {
 	var max float64
 	samples := make([]report.Sample, len(stats))
 	for i, s := range stats {
@@ -308,7 +365,7 @@ func (c *container) memoryUsageMetric(stats []docker.Stats) report.Metric {
 		// This code adapted from
 		// https://github.com/docker/cli/blob/5931fb4276be0afdd6e5ed338d1b2b4b9b5ec8e5/cli/command/container/stats_helpers.go
 		// so that Scope numbers match Docker numbers. Page cache is intentionally excluded.
-		samples[i].Value = float64(s.MemoryStats.Usage - s.MemoryStats.Stats.Cache)
+		samples[i].Value = float64(s.MemoryStats.Usage - s.MemoryStats.Stats["cache"])
 		if float64(s.MemoryStats.Limit) > max {
 			max = float64(s.MemoryStats.Limit)
 		}
@@ -316,7 +373,7 @@ func (c *container) memoryUsageMetric(stats []docker.Stats) report.Metric {
 	return report.MakeMetric(samples).WithMax(max)
 }
 
-func (c *container) cpuPercentMetric(stats []docker.Stats) report.Metric {
+func (c *container) cpuPercentMetric(stats []containertypes.StatsResponse) report.Metric {
 	if len(stats) < 2 {
 		return report.MakeMetric(nil)
 	}
@@ -326,7 +383,7 @@ func (c *container) cpuPercentMetric(stats []docker.Stats) report.Metric {
 	for i, s := range stats[1:] {
 		// Copies from docker/api/client/stats.go#L205
 		cpuDelta := float64(s.CPUStats.CPUUsage.TotalUsage - previous.CPUStats.CPUUsage.TotalUsage)
-		systemDelta := float64(s.CPUStats.SystemCPUUsage - previous.CPUStats.SystemCPUUsage)
+		systemDelta := float64(s.CPUStats.SystemUsage - previous.CPUStats.SystemUsage)
 		cpuPercent := 0.0
 		if systemDelta > 0.0 && cpuDelta > 0.0 {
 			cpuPercent = (cpuDelta / systemDelta) * 100.0
@@ -377,7 +434,7 @@ func (c *container) getSanitizedCommand() string {
 func (c *container) getBaseNode() report.Node {
 	result := report.MakeNodeWith(report.MakeContainerNodeID(c.ID()), map[string]string{
 		ContainerID:       c.ID(),
-		ContainerCreated:  c.container.Created.Format(time.RFC3339Nano),
+		ContainerCreated:  c.container.Created,
 		ContainerCommand:  c.getSanitizedCommand(),
 		ImageID:           c.Image(),
 		ContainerHostname: c.Hostname(),
@@ -391,6 +448,9 @@ func (c *container) getBaseNode() report.Node {
 
 // Return a slice including all controls that should be shown on this container
 func (c *container) controls() []string {
+	if c.container.State == nil {
+		return []string{StartContainer, RemoveContainer}
+	}
 	switch {
 	case c.container.State.Paused:
 		return []string{UnpauseContainer}
@@ -410,11 +470,12 @@ func (c *container) GetNode() report.Node {
 		ContainerStateHuman: c.State(),
 	}
 
-	if !c.container.State.Paused && c.container.State.Running {
-		uptimeSeconds := int(mtime.Now().Sub(c.container.State.StartedAt) / time.Second)
+	if c.container.State != nil && !c.container.State.Paused && c.container.State.Running {
+		startedAt, _ := time.Parse(time.RFC3339Nano, c.container.State.StartedAt)
+		uptimeSeconds := int(mtime.Now().Sub(startedAt) / time.Second)
 		networkMode := ""
 		if c.container.HostConfig != nil {
-			networkMode = c.container.HostConfig.NetworkMode
+			networkMode = string(c.container.HostConfig.NetworkMode)
 		}
 		latest[ContainerUptime] = strconv.Itoa(uptimeSeconds)
 		latest[ContainerRestartCount] = strconv.Itoa(c.container.RestartCount)

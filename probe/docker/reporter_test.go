@@ -3,7 +3,8 @@ package docker_test
 import (
 	"testing"
 
-	client "github.com/fsouza/go-dockerclient"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
 
 	"github.com/weaveworks/scope/probe/docker"
 	"github.com/weaveworks/scope/report"
@@ -11,8 +12,8 @@ import (
 
 type mockRegistry struct {
 	containersByPID map[int]docker.Container
-	images          map[string]client.APIImages
-	networks        []client.Network
+	images          map[string]image.Summary
+	networks        []network.Summary
 }
 
 func (r *mockRegistry) Stop() {}
@@ -29,13 +30,13 @@ func (r *mockRegistry) WalkContainers(f func(docker.Container)) {
 	}
 }
 
-func (r *mockRegistry) WalkImages(f func(client.APIImages)) {
+func (r *mockRegistry) WalkImages(f func(image.Summary)) {
 	for _, i := range r.images {
 		f(i)
 	}
 }
 
-func (r *mockRegistry) WalkNetworks(f func(client.Network)) {
+func (r *mockRegistry) WalkNetworks(f func(network.Summary)) {
 	for _, i := range r.networks {
 		f(i)
 	}
@@ -47,9 +48,9 @@ func (r *mockRegistry) GetContainer(_ string) (docker.Container, bool) { return 
 
 func (r *mockRegistry) GetContainerByPrefix(_ string) (docker.Container, bool) { return nil, false }
 
-func (r *mockRegistry) GetContainerImage(id string) (client.APIImages, bool) {
-	image, ok := r.images[id]
-	return image, ok
+func (r *mockRegistry) GetContainerImage(id string) (image.Summary, bool) {
+	img, ok := r.images[id]
+	return img, ok
 }
 
 var (
@@ -58,10 +59,10 @@ var (
 		containersByPID: map[int]docker.Container{
 			2: &mockContainer{container1},
 		},
-		images: map[string]client.APIImages{
+		images: map[string]image.Summary{
 			imageID: apiImage1,
 		},
-		networks: []client.Network{network1},
+		networks: []network.Summary{network1},
 	}
 )
 

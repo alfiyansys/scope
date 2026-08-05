@@ -1,13 +1,16 @@
 package docker_test
 
 import (
+	"context"
+	"encoding/json"
+	"io"
 	"net"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	client "github.com/fsouza/go-dockerclient"
+	containertypes "github.com/docker/docker/api/types/container"
 
 	"github.com/weaveworks/common/mtime"
 	"github.com/weaveworks/scope/probe/docker"
@@ -16,8 +19,12 @@ import (
 	"github.com/weaveworks/scope/test/reflect"
 )
 
+// mockStatsGatherer implements docker.StatsGatherer by streaming whatever
+// stats are handed to it via Send over an in-memory pipe, mimicking the
+// newline-delimited JSON stream a real Docker Engine ContainerStats call
+// returns.
 type mockStatsGatherer struct {
-	opts  client.StatsOptions
+	w     *io.PipeWriter
 	ready chan bool
 }
 
@@ -25,15 +32,16 @@ func newMockStatsGatherer() *mockStatsGatherer {
 	return &mockStatsGatherer{ready: make(chan bool)}
 }
 
-func (s *mockStatsGatherer) Stats(opts client.StatsOptions) error {
-	s.opts = opts
+func (s *mockStatsGatherer) ContainerStats(_ context.Context, _ string, _ bool) (containertypes.StatsResponseReader, error) {
+	r, w := io.Pipe()
+	s.w = w
 	close(s.ready)
-	return nil
+	return containertypes.StatsResponseReader{Body: r}, nil
 }
 
-func (s *mockStatsGatherer) Send(stats *client.Stats) {
+func (s *mockStatsGatherer) Send(stats *containertypes.StatsResponse) {
 	<-s.ready
-	s.opts.Stats <- stats
+	json.NewEncoder(s.w).Encode(stats)
 }
 
 func TestContainer(t *testing.T) {
@@ -51,7 +59,7 @@ func TestContainer(t *testing.T) {
 	defer c.StopGatheringStats()
 
 	// Send some stats to the docker container
-	stats := &client.Stats{}
+	stats := &containertypes.StatsResponse{}
 	stats.Read = now
 	stats.MemoryStats.Usage = 12345
 	stats.MemoryStats.Limit = 45678
@@ -76,7 +84,7 @@ func TestContainer(t *testing.T) {
 			"docker_label_foo1":            "bar1",
 			"docker_label_foo2":            "bar2",
 			"docker_container_state":       "running",
-			"docker_container_state_human": c.Container().State.String(),
+			"docker_container_state_human": c.State(),
 			"docker_container_uptime":      strconv.Itoa(uptimeSeconds),
 			"docker_env_FOO":               "secret-bar",
 		}).WithLatestActiveControls(

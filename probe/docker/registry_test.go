@@ -1,15 +1,23 @@
 package docker_test
 
 import (
+	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	client "github.com/fsouza/go-dockerclient"
+	"github.com/docker/docker/api/types"
+	containertypes "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/go-connections/nat"
 
 	"github.com/weaveworks/common/mtime"
 	"github.com/weaveworks/scope/probe/controls"
@@ -29,10 +37,10 @@ func testRegistry() docker.Registry {
 }
 
 type mockContainer struct {
-	c *client.Container
+	c *containertypes.InspectResponse
 }
 
-func (c *mockContainer) UpdateState(_ *client.Container) {}
+func (c *mockContainer) UpdateState(_ *containertypes.InspectResponse) {}
 
 func (c *mockContainer) ID() string {
 	return c.c.ID
@@ -81,117 +89,129 @@ func (c *mockContainer) NetworkInfo([]net.IP) report.Sets {
 	return report.MakeSets()
 }
 
-func (c *mockContainer) Container() *client.Container {
+func (c *mockContainer) Container() *containertypes.InspectResponse {
 	return c.c
 }
 
 func (c *mockContainer) HasTTY() bool { return true }
 
+// notFoundError satisfies containerd/errdefs' notFound marker interface, so
+// client.IsErrNotFound(err) recognizes it the same way it would a real
+// Docker Engine 404 response.
+type notFoundError struct{}
+
+func (notFoundError) Error() string { return "no such container" }
+func (notFoundError) NotFound()     {}
+
 type mockDockerClient struct {
 	sync.RWMutex
-	apiContainers []client.APIContainers
-	containers    map[string]*client.Container
-	apiImages     []client.APIImages
-	networks      []client.Network
-	events        []chan<- *client.APIEvents
+	apiContainers []containertypes.Summary
+	containers    map[string]*containertypes.InspectResponse
+	apiImages     []image.Summary
+	networks      []network.Summary
+	events        []chan events.Message
 }
 
-func (m *mockDockerClient) ListContainers(client.ListContainersOptions) ([]client.APIContainers, error) {
+func (m *mockDockerClient) ContainerList(context.Context, containertypes.ListOptions) ([]containertypes.Summary, error) {
 	m.RLock()
 	defer m.RUnlock()
 	return m.apiContainers, nil
 }
 
-func (m *mockDockerClient) InspectContainer(id string) (*client.Container, error) {
+func (m *mockDockerClient) ContainerInspect(_ context.Context, id string) (containertypes.InspectResponse, error) {
 	m.RLock()
 	defer m.RUnlock()
 	c, ok := m.containers[id]
 	if !ok {
-		return nil, &client.NoSuchContainer{}
+		return containertypes.InspectResponse{}, notFoundError{}
 	}
-	return c, nil
+	return *c, nil
 }
 
-func (m *mockDockerClient) ListImages(client.ListImagesOptions) ([]client.APIImages, error) {
+func (m *mockDockerClient) ImageList(context.Context, image.ListOptions) ([]image.Summary, error) {
 	m.RLock()
 	defer m.RUnlock()
 	return m.apiImages, nil
 }
 
-func (m *mockDockerClient) ListNetworks() ([]client.Network, error) {
+func (m *mockDockerClient) NetworkList(context.Context, network.ListOptions) ([]network.Summary, error) {
 	m.RLock()
 	defer m.RUnlock()
 	return m.networks, nil
 }
 
-func (m *mockDockerClient) AddEventListener(events chan<- *client.APIEvents) error {
+func (m *mockDockerClient) Events(ctx context.Context, _ events.ListOptions) (<-chan events.Message, <-chan error) {
+	ch := make(chan events.Message, 1024)
+	errCh := make(chan error, 1)
 	m.Lock()
-	defer m.Unlock()
-	m.events = append(m.events, events)
-	return nil
-}
-
-func (m *mockDockerClient) RemoveEventListener(events chan *client.APIEvents) error {
-	m.Lock()
-	defer m.Unlock()
-	for i, c := range m.events {
-		if c == events {
-			m.events = append(m.events[:i], m.events[i+1:]...)
+	m.events = append(m.events, ch)
+	m.Unlock()
+	go func() {
+		<-ctx.Done()
+		m.Lock()
+		defer m.Unlock()
+		for i, c := range m.events {
+			if c == ch {
+				m.events = append(m.events[:i], m.events[i+1:]...)
+				break
+			}
 		}
-	}
-	return nil
+		close(ch)
+	}()
+	return ch, errCh
 }
 
-func (m *mockDockerClient) StartContainer(_ string, _ *client.HostConfig) error {
+func (m *mockDockerClient) ContainerStart(context.Context, string, containertypes.StartOptions) error {
 	return fmt.Errorf("started")
 }
 
-func (m *mockDockerClient) StopContainer(_ string, _ uint) error {
+func (m *mockDockerClient) ContainerStop(context.Context, string, containertypes.StopOptions) error {
 	return fmt.Errorf("stopped")
 }
 
-func (m *mockDockerClient) RestartContainer(_ string, _ uint) error {
+func (m *mockDockerClient) ContainerRestart(context.Context, string, containertypes.StopOptions) error {
 	return fmt.Errorf("restarted")
 }
 
-func (m *mockDockerClient) PauseContainer(_ string) error {
+func (m *mockDockerClient) ContainerPause(context.Context, string) error {
 	return fmt.Errorf("paused")
 }
 
-func (m *mockDockerClient) UnpauseContainer(_ string) error {
+func (m *mockDockerClient) ContainerUnpause(context.Context, string) error {
 	return fmt.Errorf("unpaused")
 }
 
-func (m *mockDockerClient) RemoveContainer(_ client.RemoveContainerOptions) error {
+func (m *mockDockerClient) ContainerRemove(context.Context, string, containertypes.RemoveOptions) error {
 	return fmt.Errorf("remove")
 }
 
-func (m *mockDockerClient) Stats(_ client.StatsOptions) error {
-	return fmt.Errorf("stats")
+func (m *mockDockerClient) ContainerStats(context.Context, string, bool) (containertypes.StatsResponseReader, error) {
+	return containertypes.StatsResponseReader{}, fmt.Errorf("stats")
 }
 
-func (m *mockDockerClient) ResizeExecTTY(id string, height, width int) error {
+func (m *mockDockerClient) ContainerExecResize(context.Context, string, containertypes.ResizeOptions) error {
 	return fmt.Errorf("resizeExecTTY")
 }
 
-type mockCloseWaiter struct{}
-
-func (mockCloseWaiter) Close() error { return nil }
-func (mockCloseWaiter) Wait() error  { return nil }
-
-func (m *mockDockerClient) AttachToContainerNonBlocking(_ client.AttachToContainerOptions) (client.CloseWaiter, error) {
-	return mockCloseWaiter{}, nil
+// emptyHijackedResponse gives pumpHijackedStream a Reader it can safely call
+// Read on (immediate EOF) instead of a nil *bufio.Reader, which would panic.
+func emptyHijackedResponse() types.HijackedResponse {
+	return types.HijackedResponse{Reader: bufio.NewReader(strings.NewReader(""))}
 }
 
-func (m *mockDockerClient) CreateExec(client.CreateExecOptions) (*client.Exec, error) {
-	return &client.Exec{ID: "id"}, nil
+func (m *mockDockerClient) ContainerAttach(context.Context, string, containertypes.AttachOptions) (types.HijackedResponse, error) {
+	return emptyHijackedResponse(), nil
 }
 
-func (m *mockDockerClient) StartExecNonBlocking(string, client.StartExecOptions) (client.CloseWaiter, error) {
-	return mockCloseWaiter{}, nil
+func (m *mockDockerClient) ContainerExecCreate(context.Context, string, containertypes.ExecOptions) (containertypes.ExecCreateResponse, error) {
+	return containertypes.ExecCreateResponse{ID: "id"}, nil
 }
 
-func (m *mockDockerClient) send(event *client.APIEvents) {
+func (m *mockDockerClient) ContainerExecAttach(context.Context, string, containertypes.ExecAttachOptions) (types.HijackedResponse, error) {
+	return emptyHijackedResponse(), nil
+}
+
+func (m *mockDockerClient) send(event events.Message) {
 	m.RLock()
 	defer m.RUnlock()
 	for _, c := range m.events {
@@ -201,37 +221,45 @@ func (m *mockDockerClient) send(event *client.APIEvents) {
 
 var (
 	startTime  = time.Date(2009, time.November, 10, 23, 0, 0, 0, time.UTC)
-	container1 = &client.Container{
-		ID:    "ping",
-		Name:  "pong",
-		Image: "baz",
-		Path:  "ping",
-		Args: []string{
-			"foo.bar.local",
-		},
-		State: client.State{
-			Pid:       2,
-			Running:   true,
-			StartedAt: startTime,
-		},
-		NetworkSettings: &client.NetworkSettings{
-			IPAddress: "1.2.3.4",
-			Ports: map[client.Port][]client.PortBinding{
-				client.Port("80/tcp"): {
-					{
-						HostIP:   "1.2.3.4",
-						HostPort: "80",
-					},
-				},
-				client.Port("81/tcp"): {},
+	container1 = &containertypes.InspectResponse{
+		ContainerJSONBase: &containertypes.ContainerJSONBase{
+			ID:    "ping",
+			Name:  "pong",
+			Image:   "baz",
+			Path:    "ping",
+			Created: time.Time{}.Format(time.RFC3339Nano),
+			Args: []string{
+				"foo.bar.local",
 			},
-			Networks: map[string]client.ContainerNetwork{
+			State: &containertypes.State{
+				Status:    containertypes.StateRunning,
+				Pid:       2,
+				Running:   true,
+				StartedAt: startTime.Format(time.RFC3339Nano),
+			},
+		},
+		NetworkSettings: &containertypes.NetworkSettings{
+			NetworkSettingsBase: containertypes.NetworkSettingsBase{
+				Ports: map[nat.Port][]nat.PortBinding{
+					nat.Port("80/tcp"): {
+						{
+							HostIP:   "1.2.3.4",
+							HostPort: "80",
+						},
+					},
+					nat.Port("81/tcp"): {},
+				},
+			},
+			DefaultNetworkSettings: containertypes.DefaultNetworkSettings{
+				IPAddress: "1.2.3.4",
+			},
+			Networks: map[string]*network.EndpointSettings{
 				"network1": {
 					IPAddress: "5.6.7.8",
 				},
 			},
 		},
-		Config: &client.Config{
+		Config: &containertypes.Config{
 			Env: []string{
 				"FOO=secret-bar",
 			},
@@ -241,34 +269,38 @@ var (
 			},
 		},
 	}
-	container2 = &client.Container{
-		ID:    "wiff",
-		Name:  "waff",
-		Image: "baz",
-		State: client.State{Pid: 1, Running: true},
-		Config: &client.Config{
+	container2 = &containertypes.InspectResponse{
+		ContainerJSONBase: &containertypes.ContainerJSONBase{
+			ID:    "wiff",
+			Name:  "waff",
+			Image: "baz",
+			State: &containertypes.State{Status: containertypes.StateRunning, Pid: 1, Running: true},
+		},
+		Config: &containertypes.Config{
 			Labels: map[string]string{
 				"foo1": "bar1",
 				"foo2": "bar2",
 			},
 		},
 	}
-	renamedContainer = &client.Container{
-		ID:    "renamed",
-		Name:  "renamed",
-		Image: "baz",
-		State: client.State{Pid: 1, Running: true},
-		Config: &client.Config{
+	renamedContainer = &containertypes.InspectResponse{
+		ContainerJSONBase: &containertypes.ContainerJSONBase{
+			ID:    "renamed",
+			Name:  "renamed",
+			Image: "baz",
+			State: &containertypes.State{Status: containertypes.StateRunning, Pid: 1, Running: true},
+		},
+		Config: &containertypes.Config{
 			Labels: map[string]string{
 				"foo1": "bar1",
 				"foo2": "bar2",
 			},
 		},
 	}
-	apiContainer1       = client.APIContainers{ID: "ping"}
-	apiContainer2       = client.APIContainers{ID: "wiff"}
-	renamedAPIContainer = client.APIContainers{ID: "renamed"}
-	apiImage1           = client.APIImages{
+	apiContainer1       = containertypes.Summary{ID: "ping"}
+	apiContainer2       = containertypes.Summary{ID: "wiff"}
+	renamedAPIContainer = containertypes.Summary{ID: "renamed"}
+	apiImage1           = image.Summary{
 		ID:       "baz",
 		RepoTags: []string{"bang", "not-chosen"},
 		Labels: map[string]string{
@@ -276,22 +308,22 @@ var (
 			"imgfoo2": "bar2",
 		},
 	}
-	network1 = client.Network{
+	network1 = network.Summary{
 		ID:    "deadbeef",
 		Name:  "network1",
 		Scope: "local",
-		IPAM: client.IPAMOptions{
-			Config: []client.IPAMConfig{{Subnet: "5.6.7.8/24"}},
+		IPAM: network.IPAM{
+			Config: []network.IPAMConfig{{Subnet: "5.6.7.8/24"}},
 		},
 	}
 )
 
 func newMockClient() *mockDockerClient {
 	return &mockDockerClient{
-		apiContainers: []client.APIContainers{apiContainer1},
-		containers:    map[string]*client.Container{"ping": container1},
-		apiImages:     []client.APIImages{apiImage1},
-		networks:      []client.Network{network1},
+		apiContainers: []containertypes.Summary{apiContainer1},
+		containers:    map[string]*containertypes.InspectResponse{"ping": container1},
+		apiImages:     []image.Summary{apiImage1},
+		networks:      []network.Summary{network1},
 	}
 }
 
@@ -303,7 +335,7 @@ func setupStubs(mdc *mockDockerClient, f func()) {
 		return mdc, nil
 	}
 
-	docker.NewContainerStub = func(c *client.Container, _ string, _ bool, _ bool) docker.Container {
+	docker.NewContainerStub = func(c *containertypes.InspectResponse, _ string, _ bool, _ bool) docker.Container {
 		return &mockContainer{c}
 	}
 
@@ -325,17 +357,17 @@ func allContainers(r docker.Registry) []docker.Container {
 	return result
 }
 
-func allImages(r docker.Registry) []client.APIImages {
-	result := []client.APIImages{}
-	r.WalkImages(func(i client.APIImages) {
+func allImages(r docker.Registry) []image.Summary {
+	result := []image.Summary{}
+	r.WalkImages(func(i image.Summary) {
 		result = append(result, i)
 	})
 	return result
 }
 
-func allNetworks(r docker.Registry) []client.Network {
-	result := []client.Network{}
-	r.WalkNetworks(func(i client.Network) {
+func allNetworks(r docker.Registry) []network.Summary {
+	result := []network.Summary{}
+	r.WalkNetworks(func(i network.Summary) {
 		result = append(result, i)
 	})
 	return result
@@ -356,14 +388,14 @@ func TestRegistry(t *testing.T) {
 		}
 
 		{
-			want := []client.APIImages{apiImage1}
+			want := []image.Summary{apiImage1}
 			test.Poll(t, 100*time.Millisecond, want, func() interface{} {
 				return allImages(registry)
 			})
 		}
 
 		{
-			want := []client.Network{network1}
+			want := []network.Summary{network1}
 			test.Poll(t, 100*time.Millisecond, want, func() interface{} {
 				return allNetworks(registry)
 			})
@@ -404,10 +436,10 @@ func TestRegistryEvents(t *testing.T) {
 
 		{
 			mdc.Lock()
-			mdc.apiContainers = []client.APIContainers{apiContainer1, apiContainer2}
+			mdc.apiContainers = []containertypes.Summary{apiContainer1, apiContainer2}
 			mdc.containers["wiff"] = container2
 			mdc.Unlock()
-			mdc.send(&client.APIEvents{Status: docker.StartEvent, ID: "wiff"})
+			mdc.send(events.Message{Type: events.ContainerEventType, Action: events.ActionStart, Actor: events.Actor{ID: "wiff"}})
 			runtime.Gosched()
 
 			want := []docker.Container{&mockContainer{container1}, &mockContainer{container2}}
@@ -416,10 +448,10 @@ func TestRegistryEvents(t *testing.T) {
 
 		{
 			mdc.Lock()
-			mdc.apiContainers = []client.APIContainers{apiContainer1}
+			mdc.apiContainers = []containertypes.Summary{apiContainer1}
 			delete(mdc.containers, "wiff")
 			mdc.Unlock()
-			mdc.send(&client.APIEvents{Status: docker.DestroyEvent, ID: "wiff"})
+			mdc.send(events.Message{Type: events.ContainerEventType, Action: events.ActionDestroy, Actor: events.Actor{ID: "wiff"}})
 			runtime.Gosched()
 
 			want := []docker.Container{&mockContainer{container1}}
@@ -428,10 +460,10 @@ func TestRegistryEvents(t *testing.T) {
 
 		{
 			mdc.Lock()
-			mdc.apiContainers = []client.APIContainers{}
+			mdc.apiContainers = []containertypes.Summary{}
 			delete(mdc.containers, "ping")
 			mdc.Unlock()
-			mdc.send(&client.APIEvents{Status: docker.DieEvent, ID: "ping"})
+			mdc.send(events.Message{Type: events.ContainerEventType, Action: events.ActionDie, Actor: events.Actor{ID: "ping"}})
 			runtime.Gosched()
 
 			want := []docker.Container{}
@@ -439,7 +471,7 @@ func TestRegistryEvents(t *testing.T) {
 		}
 
 		{
-			mdc.send(&client.APIEvents{Status: docker.DieEvent, ID: "doesntexist"})
+			mdc.send(events.Message{Type: events.ContainerEventType, Action: events.ActionDie, Actor: events.Actor{ID: "doesntexist"}})
 			runtime.Gosched()
 
 			want := []docker.Container{}
@@ -448,10 +480,10 @@ func TestRegistryEvents(t *testing.T) {
 
 		{
 			mdc.Lock()
-			mdc.apiContainers = []client.APIContainers{renamedAPIContainer}
+			mdc.apiContainers = []containertypes.Summary{renamedAPIContainer}
 			mdc.containers[renamedContainer.ID] = renamedContainer
 			mdc.Unlock()
-			mdc.send(&client.APIEvents{Status: docker.RenameEvent, ID: renamedContainer.ID})
+			mdc.send(events.Message{Type: events.ContainerEventType, Action: events.ActionRename, Actor: events.Actor{ID: renamedContainer.ID}})
 			runtime.Gosched()
 
 			want := []docker.Container{&mockContainer{renamedContainer}}
@@ -490,10 +522,10 @@ func TestRegistryDelete(t *testing.T) {
 
 		{
 			mdc.Lock()
-			mdc.apiContainers = []client.APIContainers{}
+			mdc.apiContainers = []containertypes.Summary{}
 			delete(mdc.containers, "ping")
 			mdc.Unlock()
-			mdc.send(&client.APIEvents{Status: docker.DestroyEvent, ID: "ping"})
+			mdc.send(events.Message{Type: events.ContainerEventType, Action: events.ActionDestroy, Actor: events.Actor{ID: "ping"}})
 
 			check([]docker.Container{})
 

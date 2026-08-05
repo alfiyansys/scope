@@ -1,11 +1,12 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
 
-	fsouza "github.com/fsouza/go-dockerclient"
+	containertypes "github.com/docker/docker/api/types/container"
 
 	"github.com/weaveworks/common/backoff"
 )
@@ -29,7 +30,7 @@ type WeavePublisher struct {
 
 // DockerClient is the little bit of the docker client we need.
 type DockerClient interface {
-	ListContainers(fsouza.ListContainersOptions) ([]fsouza.APIContainers, error)
+	ContainerList(ctx context.Context, options containertypes.ListOptions) ([]containertypes.Summary, error)
 }
 
 // WeaveClient is the little bit of the weave clent we need.
@@ -120,7 +121,7 @@ func (w *WeavePublisher) updateDNS() (bool, error) {
 	}
 
 	// 2. work out my container name
-	containers, err := w.dockerClient.ListContainers(fsouza.ListContainersOptions{})
+	containers, err := w.dockerClient.ContainerList(context.Background(), containertypes.ListOptions{})
 	if err != nil {
 		return false, err
 	}

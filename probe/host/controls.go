@@ -3,7 +3,7 @@ package host
 import (
 	"os/exec"
 
-	"github.com/docker/docker/pkg/term"
+	"github.com/moby/term"
 	"github.com/kr/pty"
 	log "github.com/sirupsen/logrus"
 
