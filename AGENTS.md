@@ -146,6 +146,14 @@ with formatting, refactors with features, or code with unrelated docs. Each
 commit should leave the project buildable. No empty commits, no generic
 messages. Never amend or rewrite pushed history unless asked.
 
+**No `Claude-Session:` trailer.** Commits may keep `Co-Authored-By: Claude
+Sonnet 5 <noreply@anthropic.com>`, but never add a `Claude-Session: <url>`
+line — omit it from the commit template entirely, don't just remember to
+strip it after the fact. The full existing history on `master` and `dev`
+had every `Claude-Session:` trailer removed via `git filter-repo` on
+2026-08-05 (rewrote every commit from `ff765b5b` onward, force-pushed both
+branches) — don't reintroduce what was deliberately removed.
+
 ## Auto-Commit Authorization
 
 The agent may commit and push **without asking each time**, within this
