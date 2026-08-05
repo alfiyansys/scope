@@ -168,22 +168,15 @@ curl -s http://localhost:4040/api/topology/swarm-services | jq .
 
 ---
 
-## Live deployment — sm-qohelet Swarm
+## Live deployment
 
-Not a numbered phase — an actual standing deployment of this fork onto the real cluster, requested mid-effort. Recorded here since it's now running infrastructure, not just validation.
-
-**What's deployed (as of this session):** a single Swarm service, `scope_app`, one replica, constrained to the manager node (`sm-qohelet`), running app+probe together in one container (see `docker/entrypoint-deploy.sh`), `/var/run/docker.sock` mounted read-only, port 4040 published. Live at `http://sm-qohelet.local:4040`.
-
-**How it was built:**
-- `docker/Dockerfile.deploy` — a pragmatic multi-stage build, deliberately *not* `docker/Dockerfile.scope` (that one chains through `Dockerfile.cloud-agent` → `weaveworks/cloud-agent`, an Alpine/musl static-linking path bundling Weave Net binaries that this quick deployment didn't need to exercise). Builder is `golang:1.25-bookworm` — note the bump from `1.22`: `go.mod`'s `go` directive got auto-raised to `1.25.0` by a later `go mod tidy` run during Phase 2/3 work (a transitive dependency required it) and Phase 1's record of "bumped to 1.22" is now stale; `tools/build/golang/Dockerfile` (the containerized build image) needs the same bump — **follow-up, not done yet**. Runtime is `debian:bookworm-slim`, not Alpine — the binary is CGO-enabled (`gopacket`/gopcap, `tcptracer-bpf` don't build under `CGO_ENABLED=0`), so it links against glibc/libpcap/libnl/libdbus, not musl.
-- Client UI baked in from what was already built locally for Phase 2's browser validation (`client/build`, `client/build-external`, `prog/staticui`, `prog/externalui`) — not rebuilt inside the Docker build. Rebuilding the client toolchain inside a container (Node 10.19-era, needs `NODE_OPTIONS=--openssl-legacy-provider`) is real future work, not redone here.
-- Image transferred to the cluster via `docker save | ssh sm-qohelet.local docker load` — no registry involved, so this exact image only exists on that one node. Fine for a single-node deployment; **won't scale to the multi-node rollout below without a registry** (or repeating the save/load per node).
-- `.dockerignore` added (excludes `.git`, `client/node_modules`) so the build context doesn't ship ~340MB of irrelevant files.
-
-**Follow-up plan, explicitly requested but not done yet: global per-node agent deployment.** Today's `scope_app` on the manager is the "central app" half of the intended architecture. The other half — a `scope_probe` service in **global mode** (one task per node, like `portainer_agent` already does), each probe pointed at the central app rather than running its own local copy — is not built yet. When picked up:
-- Needs the probe pointed at `scope_app` over the Swarm overlay network (service-name DNS, e.g. `--app.docker=scope_app:4040`-equivalent probe flag) rather than `127.0.0.1`, since app and probe would be in separate containers on separate nodes.
-- Needs the image on a registry (or distributed to every node), since global-mode services schedule everywhere.
-- Worth deciding then whether `docker/Dockerfile.scope`'s original Alpine/static/Weave-bundled approach is worth reviving (smaller image, matches upstream's intended packaging) versus continuing with this session's Debian-slim pragmatic build — that's a real Phase 6 decision, not one to make casually mid-deployment.
+This fork is also running as real, standing infrastructure on the user's
+Swarm cluster — that's tracked separately in
+[`DEPLOYMENT-PLAN.md`](DEPLOYMENT-PLAN.md), not here. This file stays
+scoped to the codebase; that one tracks deployment topology, image
+distribution, and operational follow-ups. The `go 1.25` drift noted in
+Phase 1 above was found *while* building for that deployment, which is
+why it's cross-referenced from there.
 
 ---
 
