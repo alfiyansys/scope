@@ -72,7 +72,7 @@ const fullyPannable = () => `
 
 const overlayWrapper = props => `
   align-items: center;
-  background-color: ${transparentize(0.1, props.theme.colors.purple25)};
+  background-color: ${transparentize(0.1, props.theme.scope.panelBackgroundColor)};
   border-radius: ${props.theme.borderRadius.soft};
   color: ${props.theme.scope.textTertiaryColor};
   display: flex;
