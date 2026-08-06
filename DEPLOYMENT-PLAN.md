@@ -8,6 +8,10 @@ standing infrastructure on the user's Swarm cluster (manager
 `vanguard`) — a different, ongoing concern: deployment topology,
 image distribution, and operational follow-ups, not code changes.
 
+Also covers non-Swarm hosts that report into the same central app
+over Tailscale (see Stage 5) — not cluster members, just additional
+probes.
+
 Depends on `MODERNIZATION-PLAN.md` Phases 1–3 being done (Go
 toolchain, Docker client, Swarm support) — it is, as of this plan's
 creation.
@@ -110,3 +114,30 @@ Updated all 4 nodes to the registry image, same digest as what was already runni
 **What this unblocks:** future rebuilds are now `docker build && docker push`, then a `docker service update --image ...` / container recreate per node — no more manual `save`/`load`. The `Dockerfile.scope`-vs-`Dockerfile.deploy` base-image decision (still open, noted in Stage 1/2) and the missing systemd unit for `scope-host-probe`'s reboot survival (Stage 3) remain the two open follow-ups.
 
 **Definition of Done:** met. All 4 nodes pull `ghcr.io/alfiyansys/scope:modernized-8f6b5774` directly; `docker save`/`load` is no longer part of the deployment path.
+
+## Stage 5 — `aqila-linvis` probe over Tailscale (done, 2026-08-06)
+
+**Why:** first host outside the sm-qohelet Swarm cluster to run a probe. `aqila-linvis.hs.ian` is on a different LAN (no mDNS reachability to `sm-qohelet.local`), not a Swarm member, and joining it to the Swarm wasn't the goal — it just needed to report into the same central `scope_app` for visibility. Both hosts already had Tailscale, giving a ready-made path without touching Swarm membership or opening anything to the public internet.
+
+**What's deployed:** same Stage 3 pattern (`docker run`, not Swarm-managed) — `--net=host --pid=host --privileged`, Docker socket and `/sys/kernel/debug` mounted (this host already had debugfs mounted, so no Stage-3-style eBPF-fallback fix needed), same `ghcr.io/alfiyansys/scope:modernized-8f6b5774` image:
+
+```bash
+docker run -d --name scope-host-probe --restart=always \
+  --net=host --pid=host --privileged \
+  --entrypoint /usr/bin/scope \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v /sys/kernel/debug:/sys/kernel/debug \
+  ghcr.io/alfiyansys/scope:modernized-8f6b5774 \
+  --mode=probe --probe.docker=true --weave=false --no-app \
+  --probe.log.prefix='<hostprobe>' qohelet.home:4040
+```
+
+**Target resolution:** `qohelet.home:4040`, not `sm-qohelet.local` (unreachable — different LAN) and not the `127.0.0.1:4040`-via-routing-mesh trick Stage 3 used (`aqila-linvis` isn't a Swarm node, so there's no local mesh endpoint). `sm-qohelet` has its own direct Tailscale identity, `qohelet.home` — confirmed with a `curl .../api` 200 from `aqila-linvis` before deploying. Considered routing through `daya-regia`'s Tailscale address (also reachable) and letting the Swarm routing mesh forward it, same as Stage 3's local trick, but going straight to the manager's own Tailscale identity is more direct — one less hop, no dependency on `daya-regia` staying in the cluster.
+
+**Validated:** probe logs show a clean `Control connection to qohelet.home starting` / `Publish loop for qohelet.home starting`, no eBPF-fallback warning (kprobes registered fine, debugfs was already mounted). Confirmed registered via `curl http://qohelet.home:4040/api/topology/hosts` from `aqila-linvis` itself — `aqila-linvis` appears alongside all 4 Swarm-cluster hosts as its own node.
+
+**Known limitation, same root cause as Stage 2:** no cross-host traffic graph between `aqila-linvis` and the Swarm cluster hosts — they're on different LANs with only a Tailscale probe↔app control/publish channel between them, not a shared L2/L3 network Scope's conntrack/eBPF tracking could correlate across. This host's own local container traffic is visible; cross-cluster correlation is not, and isn't expected to be (no shared network path exists for it to observe).
+
+**Not done:** no systemd unit (same accepted gap as Stage 3 — `--restart=always` covers daemon restarts, not host reboots unless Docker itself is enabled at boot, which it is on other nodes by distro default but wasn't specifically verified here).
+
+**Definition of Done:** met. `aqila-linvis` runs a probe reporting into the existing central `scope_app`, visible in the UI as a 5th host, without any change to Swarm membership or the other 4 nodes.
