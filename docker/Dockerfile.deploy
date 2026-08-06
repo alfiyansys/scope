@@ -13,7 +13,7 @@
 # what the Go binary here actually links against (CGO-enabled: libpcap,
 # libnl, libdbus, libsystemd - needed for gopacket/tcptracer-bpf, which
 # don't build under CGO_ENABLED=0).
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends libpcap-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
