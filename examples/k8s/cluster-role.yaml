@@ -46,23 +46,6 @@ rules:
   - list
   - watch
 - apiGroups:
-  - extensions
-  resources:
-  - daemonsets
-  - deployments
-  - deployments/scale
-  - replicasets
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - extensions
-  resources:
-  - deployments/scale
-  verbs:
-  - update
-- apiGroups:
   - apps
   resources:
   - deployments/scale
@@ -76,14 +59,6 @@ rules:
   verbs:
   - list
   - watch
-- apiGroups:
-  - extensions
-  resourceNames:
-  - weave-scope
-  resources:
-  - podsecuritypolicies
-  verbs:
-  - use
 - apiGroups:
   - volumesnapshot.external-storage.k8s.io
   resources:
