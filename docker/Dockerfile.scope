@@ -1,3 +1,12 @@
+# Superseded by docker/Dockerfile.deploy as of MODERNIZATION-PLAN.md Phase 6.
+# This is the original upstream build path (weaveworks/cloud-agent base,
+# bundles the downloaded weave/weaveutil CLI binaries via runit) - nothing
+# in this fork's actual deployment (DEPLOYMENT-PLAN.md) uses it or depends
+# on it building. Kept for reference/upstream-compatibility, not maintained
+# going forward: weaveworks/cloud-agent is itself unmaintained, and Weave
+# Net integration is off by default (--weave=false) everywhere this fork
+# actually runs. Fix or retire this only if a real need for the original
+# packaging shape (single Alpine image, runit-supervised) comes up.
 FROM weaveworks/cloud-agent
 RUN apk add --no-cache runit
 COPY ./weave ./weaveutil /usr/bin/
