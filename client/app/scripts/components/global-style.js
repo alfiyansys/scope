@@ -189,7 +189,7 @@ const GlobalStyle = createGlobalStyle`
     .overlay {
       ${hideable};
 
-      background-color: ${color('white')};
+      background-color: ${scopeTheme('panelBackgroundColor')};
       position: absolute;
       width: 100%;
       height: 100%;
@@ -528,7 +528,7 @@ const GlobalStyle = createGlobalStyle`
       margin-bottom: 12px;
       padding-bottom: 2px;
       border-radius: ${borderRadius('soft')};
-      background-color: ${color('white')};
+      background-color: ${scopeTheme('panelBackgroundColor')};
       ${shadow2};
       /* keep node-details above the terminal. */
       z-index: ${props => props.theme.layers.front};
@@ -896,7 +896,7 @@ const GlobalStyle = createGlobalStyle`
           line-height: 1.5;
 
           &:hover, &.selected {
-            background-color: ${color('white')};
+            background-color: ${scopeTheme('backgroundDarkerColor')};
           }
 
           > * {
@@ -984,7 +984,7 @@ const GlobalStyle = createGlobalStyle`
     .details-wrapper .node-details-table {
       &-node {
         &:hover, &.selected {
-          background-color: ${color('white')};
+          background-color: ${scopeTheme('backgroundDarkerColor')};
         }
       }
     }
@@ -1449,7 +1449,7 @@ const GlobalStyle = createGlobalStyle`
 
     .help-panel {
       z-index: ${props => props.theme.layers.modal};
-      background-color: ${color('white')};
+      background-color: ${scopeTheme('panelBackgroundColor')};
       ${shadow2};
       display: flex;
       position: relative;

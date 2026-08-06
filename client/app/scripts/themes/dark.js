@@ -18,7 +18,6 @@ const darkTheme = {
   edgeColor: theme.colors.purple300,
   labelBackgroundColor: transparentize(0.15, darkBodyBackground),
   panelBackgroundColor: darkPanelBackground,
-  panelTextColor: theme.colors.gray50,
   textColor: theme.colors.gray50,
   textDarkerColor: theme.colors.white,
   textSecondaryColor: theme.colors.purple200,
