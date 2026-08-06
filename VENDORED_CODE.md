@@ -30,3 +30,15 @@ linked into the built binary, only where its source physically lives.
 
 [One file used in tests](COPYING.LGPL-3) is under LGPL-3, that's why we ship
 the license text in this repository.
+
+- One exception to the "no physically vendored source" rule above, added in
+  `MODERNIZATION-PLAN.md` Phase 5: [`probe/kubernetes/internal/snapshotclient/`](probe/kubernetes/internal/snapshotclient)
+  is a hand-patched copy of `github.com/openebs/k8s-snapshot-client`'s
+  generated VolumeSnapshot clientset (Apache-2.0, same license as this
+  project). That module's generated code predates `client-go`'s
+  `context.Context`-first method signatures and used the since-removed
+  `serializer.DirectCodecFactory`, so it can't compile against the
+  `client-go` version this fork now pins — it's no longer a `go.mod`
+  dependency at all. Copied in and patched in place instead of dropped,
+  to keep scope's VolumeSnapshot feature working; original license headers
+  kept on each file.

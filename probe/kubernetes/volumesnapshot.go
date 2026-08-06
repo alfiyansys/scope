@@ -1,7 +1,7 @@
 package kubernetes
 
 import (
-	snapshotv1 "github.com/openebs/k8s-snapshot-client/snapshot/pkg/apis/volumesnapshot/v1"
+	snapshotv1 "github.com/weaveworks/scope/probe/kubernetes/internal/snapshotclient/apis/v1"
 	"github.com/weaveworks/scope/report"
 )
 
