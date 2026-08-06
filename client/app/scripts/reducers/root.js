@@ -49,6 +49,7 @@ export const initialState = makeMap({
   controlStatus: makeMap(),
   currentTopology: null,
   currentTopologyId: null,
+  darkMode: false,
   errorUrl: null,
   exportingGraph: false,
   forceRelayout: false,
@@ -697,6 +698,9 @@ export function rootReducer(state = initialState, action) {
       if (action.state.contrastMode !== undefined) {
         state = state.set('contrastMode', action.state.contrastMode);
       }
+      if (action.state.darkMode !== undefined) {
+        state = state.set('darkMode', action.state.darkMode);
+      }
       if (action.state.showingNetworks) {
         state = state.set('showingNetworks', action.state.showingNetworks);
       }
@@ -739,6 +743,10 @@ export function rootReducer(state = initialState, action) {
 
     case ActionTypes.TOGGLE_CONTRAST_MODE: {
       return state.set('contrastMode', action.enabled);
+    }
+
+    case ActionTypes.TOGGLE_DARK_MODE: {
+      return state.set('darkMode', action.enabled);
     }
 
     case ActionTypes.SHUTDOWN: {
