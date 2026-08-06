@@ -24,6 +24,7 @@ limitations under the License.
 package kubernetes
 
 import (
+	"context"
 	"encoding/json"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -75,13 +76,13 @@ func (c *cordonHelper) patchOrReplace(clientset kubernetes.Interface, serverDryR
 
 	patchBytes, patchErr := strategicpatch.CreateTwoWayMergePatch(oldData, newData, c.node)
 	if patchErr == nil {
-		_, err = client.Patch(c.node.Name, types.StrategicMergePatchType, patchBytes)
+		_, err = client.Patch(context.TODO(), c.node.Name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
 	} else {
 		updateOptions := metav1.UpdateOptions{}
 		if serverDryRun {
 			updateOptions.DryRun = []string{metav1.DryRunAll}
 		}
-		_, err = client.Update(c.node)
+		_, err = client.Update(context.TODO(), c.node, updateOptions)
 	}
 	return err, patchErr
 }
