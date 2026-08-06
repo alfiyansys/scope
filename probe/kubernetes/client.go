@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,8 +13,8 @@ import (
 
 	"github.com/weaveworks/common/backoff"
 
-	snapshotv1 "github.com/openebs/k8s-snapshot-client/snapshot/pkg/apis/volumesnapshot/v1"
-	snapshot "github.com/openebs/k8s-snapshot-client/snapshot/pkg/client/clientset/versioned"
+	snapshotv1 "github.com/weaveworks/scope/probe/kubernetes/internal/snapshotclient/apis/v1"
+	snapshot "github.com/weaveworks/scope/probe/kubernetes/internal/snapshotclient/clientset"
 	"github.com/pborman/uuid"
 	log "github.com/sirupsen/logrus"
 	apiappsv1 "k8s.io/api/apps/v1"
@@ -34,8 +35,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	kubectldescribe "k8s.io/kubernetes/pkg/kubectl/describe"
-	kubectl "k8s.io/kubernetes/pkg/kubectl/describe/versioned"
+	kubectldescribe "k8s.io/kubectl/pkg/describe"
 )
 
 // Client keeps track of running kubernetes pods and services
@@ -466,7 +466,7 @@ func (c *client) CloneVolumeSnapshot(namespaceID, volumeSnapshotID, persistentVo
 	var claimSize string
 	UID := strings.Split(uuid.New(), "-")
 	scProvisionerName := "volumesnapshot.external-storage.k8s.io/snapshot-promoter"
-	scList, err := c.client.StorageV1().StorageClasses().List(metav1.ListOptions{})
+	scList, err := c.client.StorageV1().StorageClasses().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -482,7 +482,7 @@ func (c *client) CloneVolumeSnapshot(namespaceID, volumeSnapshotID, persistentVo
 	}
 	volumeSnapshot, _ := c.snapshotClient.VolumesnapshotV1().VolumeSnapshots(namespaceID).Get(volumeSnapshotID, metav1.GetOptions{})
 	if volumeSnapshot.Spec.PersistentVolumeClaimName != "" {
-		persistentVolumeClaim, err := c.client.CoreV1().PersistentVolumeClaims(namespaceID).Get(volumeSnapshot.Spec.PersistentVolumeClaimName, metav1.GetOptions{})
+		persistentVolumeClaim, err := c.client.CoreV1().PersistentVolumeClaims(namespaceID).Get(context.TODO(), volumeSnapshot.Spec.PersistentVolumeClaimName, metav1.GetOptions{})
 		if err == nil {
 			storage := persistentVolumeClaim.Spec.Resources.Requests[apiv1.ResourceStorage]
 			if storage.String() != "" {
@@ -509,14 +509,14 @@ func (c *client) CloneVolumeSnapshot(namespaceID, volumeSnapshotID, persistentVo
 			AccessModes: []apiv1.PersistentVolumeAccessMode{
 				apiv1.ReadWriteOnce,
 			},
-			Resources: apiv1.ResourceRequirements{
+			Resources: apiv1.VolumeResourceRequirements{
 				Requests: apiv1.ResourceList{
 					apiv1.ResourceName(apiv1.ResourceStorage): resource.MustParse(claimSize),
 				},
 			},
 		},
 	}
-	_, err = c.client.CoreV1().PersistentVolumeClaims(namespaceID).Create(persistentVolumeClaim)
+	_, err = c.client.CoreV1().PersistentVolumeClaims(namespaceID).Create(context.TODO(), persistentVolumeClaim, metav1.CreateOptions{})
 	if err != nil {
 		return err
 	}
@@ -555,7 +555,7 @@ func (c *client) GetLogs(namespaceID, podID string, containerNames []string) (io
 				Container:  container,
 			},
 		)
-		readCloser, err := req.Stream()
+		readCloser, err := req.Stream(context.TODO())
 		if err != nil {
 			for rc := range readClosersWithLabel {
 				rc.Close()
@@ -574,9 +574,9 @@ func (c *client) Describe(namespaceID, resourceID string, groupKind schema.Group
 	if err != nil {
 		return nil, err
 	}
-	describer, ok := kubectl.DescriberFor(groupKind, restConfig)
+	describer, ok := kubectldescribe.DescriberFor(groupKind, restConfig)
 	if !ok {
-		describer, ok = kubectl.GenericDescriberFor(&restMapping, restConfig)
+		describer, ok = kubectldescribe.GenericDescriberFor(&restMapping, restConfig)
 		if !ok {
 			return nil, errors.New("Resource not found")
 		}
@@ -595,7 +595,7 @@ func (c *client) Describe(namespaceID, resourceID string, groupKind schema.Group
 }
 
 func (c *client) DeletePod(namespaceID, podID string) error {
-	return c.client.CoreV1().Pods(namespaceID).Delete(podID, &metav1.DeleteOptions{})
+	return c.client.CoreV1().Pods(namespaceID).Delete(context.TODO(), podID, metav1.DeleteOptions{})
 }
 
 func (c *client) DeleteVolumeSnapshot(namespaceID, volumeSnapshotID string) error {
@@ -616,12 +616,12 @@ func (c *client) ScaleDown(namespaceID, id string) error {
 
 func (c *client) modifyScale(namespaceID, id string, f func(*autoscalingv1.Scale)) error {
 	scaler := c.client.AppsV1().Deployments(namespaceID)
-	scale, err := scaler.GetScale(id, metav1.GetOptions{})
+	scale, err := scaler.GetScale(context.TODO(), id, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
 	f(scale)
-	_, err = scaler.UpdateScale(id, scale)
+	_, err = scaler.UpdateScale(context.TODO(), id, scale, metav1.UpdateOptions{})
 	return err
 }
 
@@ -630,7 +630,7 @@ func (c *client) Stop() {
 }
 
 func (c *client) CordonNode(name string, desired bool) error {
-	node, err := c.client.CoreV1().Nodes().Get(name, metav1.GetOptions{})
+	node, err := c.client.CoreV1().Nodes().Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -651,7 +651,7 @@ func (c *client) CordonNode(name string, desired bool) error {
 }
 
 func (c *client) GetNodes() ([]apiv1.Node, error) {
-	l, err := c.client.CoreV1().Nodes().List(metav1.ListOptions{})
+	l, err := c.client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}

@@ -185,20 +185,39 @@ why it's cross-referenced from there.
 **Why:** `probe/endpoint/ebpf.go` uses legacy kprobe-based BPF that compiles against a specific kernel's headers — this is the piece most likely to be silently dead weight on any modern kernel.
 
 **Tasks:**
-- [ ] On a current kernel (5.x/6.x), attempt to load the existing eBPF tracer and confirm whether it works, fails loudly, or fails silently (check logs for BPF verifier/load errors).
-- [ ] Check whether `probe/endpoint/` already has a non-eBPF fallback (proc-based connection scanning); if the eBPF path is failing silently today, that's a correctness bug independent of modernization.
-- [ ] If repairing: port to `cilium/ebpf` (CO-RE, compile-once-run-everywhere) instead of `iovisor/gobpf`.
-- [ ] If not repairing now: make the eBPF path an explicit opt-in with a loud startup log on failure, so it degrades safely instead of silently under-reporting connections.
-- [ ] Benchmark whichever path ends up default (eBPF exists for a performance reason at high connection counts — confirm the fallback's cost before deciding to drop eBPF).
+- [x] On a current kernel (5.x/6.x), attempt to load the existing eBPF tracer and confirm whether it works, fails loudly, or fails silently (check logs for BPF verifier/load errors).
+- [x] Check whether `probe/endpoint/` already has a non-eBPF fallback (proc-based connection scanning); if the eBPF path is failing silently today, that's a correctness bug independent of modernization.
+- [x] ~~If repairing: port to `cilium/ebpf` (CO-RE, compile-once-run-everywhere) instead of `iovisor/gobpf`.~~ **Not needed** — see finding below, the existing tracer works as-is on current kernels once given the right mount/privileges.
+- [x] ~~If not repairing now: make the eBPF path an explicit opt-in with a loud startup log on failure.~~ **N/A** — the existing fallback (see below) already logs loudly and degrades safely; nothing to add.
+- [ ] Benchmark whichever path ends up default. Not done — eBPF is confirmed working and is the existing default (`--probe.ebpf.connections=true`), so there's no fallback-cost decision pending on it right now. Worth doing if connection-tracking overhead ever becomes a real question.
 
-**Commands:**
+**Finding: the legacy tracer isn't broken on modern kernels — it was never given the mount it needs**
+
+`probe/endpoint/connection_tracker.go:34-44` already has a real, loud fallback: if `newEbpfTracker()` fails, it logs `WARN: Error setting up the eBPF tracker, falling back to proc scanning: <reason>` and degrades to conntrack/proc scanning; `ReportConnections` also detects and recovers from later runtime deaths (timestamp corruption, lost events), not just first-load failure. So task 2's "is it failing silently" question was already answered by the code before touching anything: no, it wasn't silent, it just wasn't succeeding.
+
+Checked the real, already-running deployment (`DEPLOYMENT-PLAN.md`'s 4-node Swarm cluster) via `docker service logs scope_probe`/`scope_app` — every node was hitting the fallback, with three distinct errors depending on which capabilities each container had at the time:
+1. Plain Swarm services, no extra caps: `error while loading map "maps/tcp_event_ipv4": operation not permitted` — BPF map creation needs `CAP_SYS_ADMIN`/`CAP_BPF`, which Swarm services don't have by default.
+2. Same services after `DEPLOYMENT-PLAN.md` Stage 2 added `NET_ADMIN`/`SYS_ADMIN`/`NET_RAW`/`SYS_RESOURCE`: map creation started succeeding, but kprobe registration then failed — `cannot open kprobe_events: open /sys/kernel/debug/tracing/kprobe_events: no such file or directory`. Swarm services can never get `--privileged`/`--net=host`/`--pid=host` (confirmed in Stage 2), so this is a dead end for them regardless.
+3. Stage 3's `scope-host-probe` (`--privileged --net=host --pid=host`, not Swarm-managed) has every capability needed, but its `docker run` never bind-mounted `/sys/kernel/debug` — same "no such file" error, on a technicality.
+
+Confirmed the actual fix live: added `-v /sys/kernel/debug:/sys/kernel/debug` to a `--privileged --net=host --pid=host` container running the existing binary, on this machine's real kernel (`7.0.0-28-generic`). The eBPF tracer loaded cleanly (no fallback warning) and `--probe.log.level=debug` showed real `handleConnection(connect/accept/close, ...)` events for actual live TCP connections, correctly attributed by PID — the legacy `iovisor/gobpf`/kprobe-based tracer, unmodified, works end-to-end on a current kernel. One caveat found along the way: kprobes registered via `/sys/kernel/debug/tracing/kprobe_events` are **host-global, not container-namespaced** — a killed/crashed tracer that doesn't clean up its own kprobes will collide with the next attempt (`cannot write ...: file exists`); worth keeping in mind if this ever needs a clean restart story beyond what `EbpfTracker.stop()`/`Tracer.Stop()` already do.
+
+Applied the one-line fix to the live deployment (all 4 nodes: `sm-qohelet`, `daya-regia`, `sw-david01`, `vanguard`) — tracked in `DEPLOYMENT-PLAN.md`, not here, per the usual code-vs-deployment split.
+
+**Commands (validation used):**
 ```bash
-uname -r
-dmesg | grep -i bpf | tail -20
-# run scope with eBPF enabled and check probe logs for load/verifier errors
+uname -r   # 7.0.0-28-generic (this machine); 6.8.0-136-generic / 6.17.0-22-generic on the cluster's other nodes
+docker run --rm --privileged --net=host --pid=host \
+  -v /sys/kernel/debug:/sys/kernel/debug \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  --entrypoint /usr/bin/scope alfiyansys/scope:modernized-8f6b5774 \
+  --mode=probe --probe.docker=true --weave=false --no-app --probe.log.level=debug \
+  --probe.log.prefix='<dbg>' 127.0.0.1:4040
+# then watch for "EbpfTracker"/"handleConnection" debug lines and the absence of
+# "Error setting up the eBPF tracker, falling back to proc scanning"
 ```
 
-**Definition of Done:** either eBPF tracing demonstrably works on a current kernel with a documented minimum kernel version, or it's explicitly disabled with a clear fallback and a tracked follow-up — not silently broken.
+**Definition of Done:** met. eBPF tracing demonstrably works on current kernels (7.0.0, 6.8.0, 6.17.0 all confirmed), root cause of the earlier failures fully explained, and the fix has been applied to the real deployment, not just diagnosed.
 
 ---
 
@@ -206,20 +225,31 @@ dmesg | grep -i bpf | tail -20
 
 **Why:** `k8s.io/client-go v10`/`k8s.io/kubernetes v1.13.0` predates several stable API removals; also `k8s.io/kubernetes` as a dependency is a known anti-pattern that drags in the whole server codebase.
 
+**Constraint for this phase:** done with no Kubernetes cluster (kind/minikube/k3s/etc.) installed on the dev machine, by the user's explicit request. All of the tasks below are code-level and don't need one *except* the last — see the Definition of Done note.
+
 **Tasks:**
-- [ ] Upgrade `k8s.io/client-go`, `k8s.io/api`, `k8s.io/apimachinery` to a current matched release set (e.g. `v0.30.x`).
-- [ ] Audit `probe/kubernetes/` for what `k8s.io/kubernetes` is actually imported for; replace those specific usages with the equivalent `k8s.io/api/...` types and drop the `k8s.io/kubernetes` dependency entirely.
-- [ ] Grep for `extensions/v1beta1` (old Deployments/Ingress/DaemonSets/ReplicaSets path) and migrate to `apps/v1` / `networking.k8s.io/v1` — the old group was removed from Kubernetes well before current versions and will hard-fail against a modern API server.
-- [ ] Re-test `examples/k8s/` manifests (RBAC roles, service account bindings) against a current cluster — API group names in `ClusterRole` rules likely need updating alongside the code.
+- [x] Upgrade `k8s.io/client-go`, `k8s.io/api`, `k8s.io/apimachinery` to a current matched release set. Went with `v0.36.3` (latest stable at the time, not the plan's example `v0.30.x` — "current" was the actual goal) plus `k8s.io/kubectl v0.36.3` (new, see below).
+- [x] Audit `probe/kubernetes/` for what `k8s.io/kubernetes` is actually imported for; replace those specific usages with the equivalent `k8s.io/api/...` types and drop the `k8s.io/kubernetes` dependency entirely. Turned out to be a single, narrow usage: `probe/kubernetes/client.go`'s `Describe()` method used `k8s.io/kubernetes/pkg/kubectl/describe` (the `kubectl describe` output generator) for the UI's resource-describe feature. Kubernetes split `kubectl`'s implementation out into its own `k8s.io/kubectl` module years ago with the same package shape (`k8s.io/kubectl/pkg/describe`, same `DescriberFor`/`GenericDescriberFor`/`DescriberSettings` signatures) — swapped the import, no logic changes needed. `k8s.io/kubernetes` is gone from `go.mod` entirely.
+- [x] Grep for `extensions/v1beta1` and migrate to `apps/v1`/`networking.k8s.io/v1`. Zero hits in the Go code (already clean) and `examples/k8s/*.yaml` already used `apps/v1`/`rbac.authorization.k8s.io/v1`. But `examples/k8s/cluster-role.yaml` still had `extensions`-group RBAC rules for `daemonsets`/`deployments`/`deployments/scale`/`replicasets`/`podsecuritypolicies` — the `extensions` group doesn't exist in current Kubernetes at all, and grepping confirmed the Go code doesn't use `ReplicaSet` or `PodSecurityPolicy` anywhere, so these rules were pure dead weight matching nothing. Removed them (the `apps`-group `deployments`/`statefulsets`/`daemonsets` rule already covers what's actually used).
+- [ ] Re-test `examples/k8s/` manifests against a current cluster — **blocked**, not done. No cluster available in this environment (by design, per the constraint above). Code compiles and unit tests pass, but this specific task needs a real `kubeadm`/`kind`/EKS target to actually verify, same as `DEPLOYMENT-PLAN.md`'s validation bar for Docker/Swarm. Follow-up for whenever a cluster is available (or point it at a remote one over `kubeconfig`, the way Phase 2/3/4 pointed at the real Swarm cluster over SSH).
+
+**Found and fixed along the way (not anticipated by the original task list):**
+
+- **`github.com/openebs/k8s-snapshot-client` (the `VolumeSnapshot` feature's clientset) couldn't compile against modern `client-go` at all.** It's a 2018-era generated clientset for an OpenEBS-specific, pre-CSI `volumesnapshot.external-storage.k8s.io/v1` API (not the standard Kubernetes CSI `VolumeSnapshot` API). Its generated REST calls predate `context.Context`-first signatures (`.Do()` → needs `.Do(ctx)`) and its `NegotiatedSerializer` used `serializer.DirectCodecFactory`, which no longer exists in `apimachinery`. Since only one `client-go` version can exist in a build, this couldn't be worked around without either dropping the feature or patching the vendored client. **Decision (asked the user):** patch it in place rather than drop it or port to the modern CSI API — this is deeply threaded through the probe *and* the report/render layers (`report/report.go`, `render/persistentvolume.go`, `render/detailed/*.go`, etc.) as a whole topology type, and the goal was to keep the exact existing feature/API surface working, not reimplement it. Copied the small generated clientset into `probe/kubernetes/internal/snapshotclient/` (Apache-2.0, license headers kept, noted in `VENDORED_CODE.md`) and hand-fixed exactly the two breaks: `.Do()`/`.Watch()` calls now take `context.TODO()`, and `NegotiatedSerializer` now uses `scheme.Codecs.WithoutConversion()` (the modern equivalent of `DirectCodecFactory`). No other behavior changed — the public method signatures callers use (`Get`/`List`/`Create`/`Delete`/etc., no `context.Context` param) are untouched on purpose, so `probe/kubernetes/client.go`'s calls into it didn't need to change at all. It's no longer a `go.mod` dependency; `k8s.io/kubernetes` was the only reason `go.mod` still listed it indirectly.
+- **`PersistentVolumeClaimSpec.Resources` changed type** from `core.ResourceRequirements` to the new, narrower `core.VolumeResourceRequirements` (same `Limits`/`Requests` fields, just a distinct type) — a real upstream API change, not a mechanical rename. One-line fix in `client.go`'s `CloneVolumeSnapshot`.
+- **`context.Context` threading across `probe/kubernetes/client.go` and `cordon.go`** — every `client-go` call (`List`/`Get`/`Create`/`Delete`/`Watch`/`Patch`/`GetScale`/`UpdateScale`/`Stream`) now requires a leading `context.Context`. Used `context.TODO()` at each call site rather than threading a real context through the whole `Client` interface — that would be a much bigger, unrelated refactor touching every caller across the probe, and out of scope for "get this compiling against a current client-go." Worth a follow-up if this codebase ever does a real context-cancellation pass.
+- **`cordon.go`'s `patchOrReplace` had a pre-existing dead-code oddity**, unrelated to this bump: it built an `updateOptions` (with `DryRun` set) but then called `client.Update(c.node)` without ever passing it — because old `client-go`'s `Update` took no options param at all, so there was nowhere to put it. Modern `client-go`'s `Update(ctx, node, opts)` actually has that parameter, so `updateOptions` is now genuinely passed through, matching what this file's upstream source (`kubectl/pkg/drain/cordon.go`) actually intended.
+- **`go.mod`'s `go` directive auto-bumped again**, `1.25.0` → `1.26.0`, same pattern Phase 1/2 already flagged (a transitive dependency requires it, nobody chooses it directly). `tools/build/golang/Dockerfile` is now two versions further behind (`golang:1.22-bookworm` vs. the `1.26` the module graph now wants) — same open follow-up as before, just a bigger gap.
 
 **Commands:**
 ```bash
-grep -rn "extensions/v1beta1" probe/kubernetes/ examples/k8s/
-go get k8s.io/client-go@v0.30.0 k8s.io/api@v0.30.0 k8s.io/apimachinery@v0.30.0
+grep -rn "extensions/v1beta1" probe/kubernetes/ examples/k8s/   # zero hits in Go code
+go get k8s.io/api@v0.36.3 k8s.io/apimachinery@v0.36.3 k8s.io/client-go@v0.36.3 k8s.io/kubectl@v0.36.3
 go mod tidy
+go build ./... && go test ./...
 ```
 
-**Definition of Done:** scope's Kubernetes probe connects to a current-minor kubeadm/kind/EKS cluster, and pod/deployment/replicaset/service topologies render correctly with no API-group errors in probe logs.
+**Definition of Done:** partially met. The code compiles clean against current `k8s.io/client-go`/`api`/`apimachinery`, `k8s.io/kubernetes` is fully gone, `go vet`/`go test ./...` are clean (same pre-existing, unrelated findings as every prior phase's baseline — nothing new). **Not yet met:** "connects to a current-minor kubeadm/kind/EKS cluster... no API-group errors in probe logs" — this needs an actual live cluster, which this environment deliberately doesn't have. Tracked as the one remaining task above; close it out the next time a real cluster (local or remote) is available to point `--kubernetes-cluster` at.
 
 ---
 
