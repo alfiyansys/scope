@@ -81,7 +81,7 @@ Two things made this work cleanly:
 
 **Follow-up fix (2026-08-06, during `MODERNIZATION-PLAN.md` Phase 4): `scope-host-probe` was still silently missing eBPF connection tracking.** Despite having `--privileged --net=host --pid=host`, the command above never bind-mounted `/sys/kernel/debug`, so `probe/endpoint/ebpf.go`'s kprobe registration failed with `cannot open kprobe_events: no such file or directory` and every node quietly fell back to conntrack/proc scanning (logged as a `WARN`, not actually silent, but easy to miss). Fixed by adding `-v /sys/kernel/debug:/sys/kernel/debug` to the `docker run` command below and recreating the container on all 4 nodes (`daya-regia`, `sm-qohelet`, `sw-david01`, `vanguard`). Confirmed live on all 4: no more eBPF fallback warning in any of their logs.
 
-Current command, live on all 4 nodes as of 2026-08-06:
+Command as of this fix (image source superseded a few hours later by Stage 4 below — see there for the current `ghcr.io`-based command):
 ```bash
 docker run -d --name scope-host-probe --restart=always \
   --net=host --pid=host --privileged \
@@ -94,3 +94,19 @@ docker run -d --name scope-host-probe --restart=always \
 ```
 
 One thing to know if this container ever needs a manual restart: kprobes registered via `/sys/kernel/debug/tracing/kprobe_events` are host-global, not container-scoped. A container killed hard enough to skip its own cleanup can leave stale kprobes behind, which makes the *next* attempt fail with `cannot write ...: file exists` — clear them with `echo > /sys/kernel/debug/tracing/kprobe_events` (needs a privileged container or root) before retrying if that happens.
+
+## Stage 4 — GHCR image distribution (done)
+
+**Why:** Stages 1–3 all distributed the image via `docker save | ssh <host> docker load` — no registry, so every rebuild meant manually copying a ~145MB tarball to each of the 4 nodes by hand. Flagged as a known limitation since Stage 2 ("won't scale much further"). Replaced with GitHub Container Registry.
+
+**What changed:** pushed the existing image to `ghcr.io/alfiyansys/scope:modernized-8f6b5774` (and `:latest`), then set the package to **public** on GitHub so no node needs its own registry credentials to pull — the image only contains the compiled `scope` binary and UI assets, nothing sensitive. Verified public, unauthenticated pull worked from a node with zero `ghcr.io` login (`sm-qohelet.local`) before rolling anything out further.
+
+Updated all 4 nodes to the registry image, same digest as what was already running (`sha256:ea8792c3...`), so this was a distribution-path change, not a code/behavior change:
+- `docker service update --image ghcr.io/alfiyansys/scope:modernized-8f6b5774 scope_app` and `scope_probe` — both converged clean, no errors.
+- Recreated `scope-host-probe` on all 4 nodes (`sm-qohelet`, `daya-regia`, `sw-david01`, `vanguard`) with the same `docker run` command as Stage 3, just pointing at `ghcr.io/alfiyansys/scope:modernized-8f6b5774` instead of the locally-tagged `alfiyansys/scope:modernized-8f6b5774`. eBPF still loads cleanly on all 4 (no fallback warning), confirming the debugfs-mount fix from Phase 4 survived the swap.
+
+**Validated:** `curl http://127.0.0.1:4040/api` returns `HTTP 200` on all 4 nodes post-cutover. One transient blip during validation — `scope_app`'s routing-mesh path timed out for about 15 seconds right after the burst of service updates and container recreations across the cluster, while the app itself was already serving fine internally (`docker exec ... curl` returned `200` the whole time) — settled on its own, not a real regression.
+
+**What this unblocks:** future rebuilds are now `docker build && docker push`, then a `docker service update --image ...` / container recreate per node — no more manual `save`/`load`. The `Dockerfile.scope`-vs-`Dockerfile.deploy` base-image decision (still open, noted in Stage 1/2) and the missing systemd unit for `scope-host-probe`'s reboot survival (Stage 3) remain the two open follow-ups.
+
+**Definition of Done:** met. All 4 nodes pull `ghcr.io/alfiyansys/scope:modernized-8f6b5774` directly; `docker save`/`load` is no longer part of the deployment path.
