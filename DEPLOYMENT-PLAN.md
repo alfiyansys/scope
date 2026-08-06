@@ -78,3 +78,19 @@ Two things made this work cleanly:
 **Validated:** immediately eliminated the `conntrack Follow error: operation not permitted` spam (host+pid namespace access is what conntrack actually needs, not just capabilities). Endpoint count went from the Stage 2 ceiling straight to 771 total / 524 non-scope-internal adjacencies — real BitTorrent/VPN/RTSP/Swarm-gossip traffic, not just probe↔app noise. Confirmed the specific thing that prompted this: clicked `traefik_traefik.1` in the UI and it shows a direct, live edge to `dvr-window_dvr-window.1` on `sw-david01` — cross-node, cross-service, real traffic, screenshotted.
 
 **Definition of Done:** met. Real application-level cross-container/cross-host traffic (the `traefik` ↔ `dvr-window` case specifically) is now visible in the UI, without removing or replacing anything from Stages 1–2.
+
+**Follow-up fix (2026-08-06, during `MODERNIZATION-PLAN.md` Phase 4): `scope-host-probe` was still silently missing eBPF connection tracking.** Despite having `--privileged --net=host --pid=host`, the command above never bind-mounted `/sys/kernel/debug`, so `probe/endpoint/ebpf.go`'s kprobe registration failed with `cannot open kprobe_events: no such file or directory` and every node quietly fell back to conntrack/proc scanning (logged as a `WARN`, not actually silent, but easy to miss). Fixed by adding `-v /sys/kernel/debug:/sys/kernel/debug` to the `docker run` command below and recreating the container on all 4 nodes (`daya-regia`, `sm-qohelet`, `sw-david01`, `vanguard`). Confirmed live on all 4: no more eBPF fallback warning in any of their logs.
+
+Current command, live on all 4 nodes as of 2026-08-06:
+```bash
+docker run -d --name scope-host-probe --restart=always \
+  --net=host --pid=host --privileged \
+  --entrypoint /usr/bin/scope \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v /sys/kernel/debug:/sys/kernel/debug \
+  alfiyansys/scope:modernized-8f6b5774 \
+  --mode=probe --probe.docker=true --weave=false --no-app \
+  --probe.log.prefix='<hostprobe>' 127.0.0.1:4040
+```
+
+One thing to know if this container ever needs a manual restart: kprobes registered via `/sys/kernel/debug/tracing/kprobe_events` are host-global, not container-scoped. A container killed hard enough to skip its own cleanup can leave stale kprobes behind, which makes the *next* attempt fail with `cannot write ...: file exists` — clear them with `echo > /sys/kernel/debug/tracing/kprobe_events` (needs a privileged container or root) before retrying if that happens.
