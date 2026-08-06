@@ -258,18 +258,57 @@ go build ./... && go test ./...
 **Why:** cosmetic/hygiene relative to Phases 1–5, but blocks a trustworthy release artifact.
 
 **Tasks:**
-- [ ] Replace `FROM weaveworks/cloud-agent` in `docker/Dockerfile.scope` with a maintained base (plain `alpine`, explicit `runit` package install, or drop `runit` and run app+probe as separate processes/containers).
-- [ ] Decide fate of the Weave Net overlay integration (`app/weave.go`, vendored `weaveworks/weave` v2.3.1): Weave Net is itself unmaintained, so either update the vendored version or make the integration clearly optional/off-by-default and stop building it in by default.
-- [ ] Run `govulncheck ./...` and address flagged deps — known-stale candidates already visible in `go.mod`: `hashicorp/consul` (pre-1.0 pin), `nats-io/nats` (pre-1.0 client), `aws/aws-sdk-go` v1 (consider v2 if the ECS probe code is kept).
+- [x] Replace `FROM weaveworks/cloud-agent` in `docker/Dockerfile.scope` with a maintained base — **decided not to** (asked the user directly). `docker/Dockerfile.deploy` has been the real production build path since Stage 1, specifically built to avoid `Dockerfile.scope`'s Alpine/musl + bundled-Weave-Net packaging; nothing in `DEPLOYMENT-PLAN.md` uses or depends on `Dockerfile.scope` building. Marked it as superseded with an explanatory comment instead of investing in a fix nobody needs.
+- [x] Decide fate of the Weave Net overlay integration — **deprioritized, not dropped**: it's already off by default everywhere this fork actually runs (`--weave=false` on every deployment command in `DEPLOYMENT-PLAN.md`). Bumped the vendored `weaveworks/weave` v2.3.1 → v2.6.3 anyway since it was a real, cheap CVE fix (see below), but no further investment in the feature itself.
+- [x] Run `govulncheck ./...` and address flagged deps. **28 → 3 vulnerabilities.** The plan's original candidate list (`hashicorp/consul`, `nats-io/nats`, `aws/aws-sdk-go` v1) was written before actually running the tool — `nats-io/nats` and `aws/aws-sdk-go` v1 are still old but **weren't flagged** by govulncheck (no disclosed CVE matches their pinned versions), so left alone; bumping `aws-sdk-go` to v2 would be its own large migration (same shape as Phase 5's `client-go` bump) and wasn't actually required by this task's Definition of Done, so not done here.
+
+**What govulncheck actually found and what was done about each:**
+- `github.com/prometheus/client_golang` v1.5.0 → **v1.11.1**: safe, no behavior change.
+- `github.com/miekg/dns` (2016 vintage) → **v1.1.25**: safe, no behavior change.
+- `github.com/hashicorp/consul` v0.6.4 (pre-1.0, only reachable through `app/multitenant/consul_client.go` — Weave-Cloud-era code, "not relevant to this fork's goals" per `AGENTS.md`) → the old monolithic module was fully dropped and replaced with the standalone `github.com/hashicorp/consul/api` **v1.28.2** module it split into years ago. Not a version bump so much as following where the package actually moved.
+- `github.com/weaveworks/weave` v2.3.1 → **v2.6.3**, per the deprioritized-not-dropped decision above.
+- Several stdlib CVEs (`crypto/tls`, `crypto/x509`, `html/template`, `mime`, `net`, `net/http`) had nothing to do with this project's own dependencies at all — they were fixed in Go point releases past what was locally installed. Pinned an explicit `toolchain go1.26.5` directive in `go.mod` (was implicitly `go1.26.2`); `go`'s `GOTOOLCHAIN=auto` downloaded it automatically on the next build. `tools/build/golang/Dockerfile` should track this too, adding to the already-open follow-up from Phase 1/2/5 about that file drifting behind the module graph's actual `go`/`toolchain` requirement.
+- `github.com/docker/docker` (already latest, `v28.5.2`, from Phase 2) — the remaining 3 findings (`docker cp` symlink race, Moby AuthZ plugin bypass, an off-by-one in Moby's plugin privilege validation) have **no fix available** (`Fixed in: N/A`) and are daemon-side Moby behaviors — this project only imports the client SDK, never runs a daemon or implements AuthZ plugins, so these aren't reachable through this project's actual usage even though `govulncheck`'s call-graph analysis flags the import path. Accepted as-is; nothing actionable here.
+
+**Also found and fixed while starting this phase, unrelated to any dependency bump:** `docker/entrypoint-deploy.sh` was only passing `--weave=false` to the probe half of `scope_app`'s bundled processes, not the app half — since `--weave` defaults to `true` and this image doesn't bundle the `weave`/`weaveutil` binaries, the app process has been logging `Error updating weaveDNS ... weave: executable file not found` on a repeating backoff since Stage 1, present in every deployment stage's logs throughout this whole modernization effort and previously dismissed as noise. Fixed by adding `--weave=false` to both halves.
+
+**Commands (validation used):**
+```bash
+go install golang.org/x/vuln/cmd/govulncheck@latest
+govulncheck ./...   # 28 vulnerabilities from 5 modules, before
+govulncheck ./...   # 3 vulnerabilities from 1 module (docker/docker, no fix available), after
+go build ./... && go vet ./... && go test ./...
+```
+
+**Definition of Done:** met, with explicit decisions recorded rather than silent scope-narrowing. `docker/Dockerfile.scope`'s fate is decided (superseded, not fixed) rather than an accident; Weave Net's status is an explicit decision (deprioritized, not dropped, still patched); `govulncheck` findings addressed everywhere a fix existed and was reachable through this project's actual usage, with the 3 remaining ones documented as accepted (no fix exists, not applicable to client-only usage) rather than silently ignored.
+
+---
+
+## Phase 7 — Report-serving efficiency: skip the unconditional per-tick deep copy
+
+**Why:** found during `DEPLOYMENT-PLAN.md`'s Stage 6 resource investigation, not part of the original modernization scope, but a real codebase-level inefficiency worth its own phase rather than a silent side-fix. `app/api_topology.go:139` ticks every `websocketLoop = 1*time.Second` per open browser tab; every tick calls `wc.update()` → `app/collector.go`'s `Report()`, which returns `c.cached.Copy()` **unconditionally** — a full deep copy of every `Topology`'s node map (`report/topology.go`'s `Copy()`) — even when nothing has changed since the previous tick. There's no dirty-check gating the copy, render (`RendererForTopology`), or diff. Cost scales with (open UI tabs) × (report size) × 1/sec, paid whether or not anything actually changed. Low-impact at this fork's current deployment (realistically 0–1 tabs open at once, per `DEPLOYMENT-PLAN.md`'s own assessment) but a real, fixable thing, not a hypothetical.
+
+**Correctness check done before scoping this phase (don't skip re-verifying if this phase sits untouched for a while):** confirmed no rendering path depends on wall-clock time passing independent of new data arriving — grepped `render/detailed/summary.go`, `render/detailed/node.go`, `render/filters.go` for `time.Now()`/`time.Since()`/staleness-fade logic and found none (the only `mtime.Now()` hit, `render/filters.go:195`, *writes* a connectivity timestamp, doesn't read one for staleness display). This matters because it means "the merged report hasn't changed" really does imply "the rendered output would be identical" — the skip below is safe, not just fast.
+
+**Design (the actual trigger point matters — verified against real behavior, not assumed):** `collector.Report()` (`app/collector.go`) has *two* separate paths that reassign `c.cached`: a new report arriving via `Add()` invalidates the cache (`c.cached = nil`), **and** the report-retention window rolling forward can also force a recompute even with zero new data (`c.timestamps[0].After(oldest)` flipping false as time passes, tested today by `TestCollectorExpire` in `app/collector_test.go:75`). A naive "bump a counter in `Add()`" tracker would miss the second case and silently serve stale-but-should-have-changed UI when an old report ages out of the window with no new report arriving. The version counter below is bumped at the one point that's actually correct for both cases: where `c.cached = &rpt` is assigned inside `Report()`'s recompute branch.
+
+**Tasks:**
+- [ ] `app/collector.go`: add a `version uint64` field to the `collector` struct; increment it at the point `c.cached = &rpt` is set inside `Report()`'s recompute branch (not in `Add()` — see Design above for why). Add a cheap, lock-protected getter: `func (c *collector) Version(context.Context) (uint64, error)` — no copying, no rendering, just returns the current counter under `c.mtx`.
+- [ ] `app/collector.go`: add `Version(context.Context) (uint64, error)` to the `Reporter` interface (line ~30).
+- [ ] `app/multitenant/collector.go` and `app/multitenant/aws_collector.go`: both implement `Reporter` and need this method to keep compiling. Weave-Cloud-era code, not relevant to this fork's goals (per `AGENTS.md`) — implement conservatively, not correctly-optimized: return a fresh monotonic value every call (e.g. `uint64(mtime.Now().UnixNano())`), which always compares as "changed" and exactly preserves their current always-render behavior. Don't try to add real dirty-checking to code this fork doesn't use.
+- [ ] `app/api_topology.go`: add `lastVersion uint64` and `versionInitialized bool` to `websocketState`. At the top of `update()`, call `wc.rep.Version(ctx)`; if `err == nil && wc.versionInitialized && version == wc.lastVersion`, return immediately — skip `Report()`, `RendererForTopology`, and the diff entirely for this tick. Otherwise proceed as today, then record `wc.lastVersion = version; wc.versionInitialized = true` at the end. Fail open on error (any `Version()` error just falls through to the normal render path, never silently stalls the UI).
+- [ ] Unit tests in `app/collector_test.go`: extend `TestCollector` (or add `TestCollectorVersion`) to assert (a) `Version()` unchanged across repeated `Report()` calls with no `Add()` and timestamp still in-window; (b) `Version()` increments after `Add()` + a `Report()` call; (c) — the one that actually matters, extending `TestCollectorExpire`'s existing time-advancing setup — `Version()` also increments when the window rolls forward and forces a recompute with *no* new `Add()` call.
+- [ ] A rendered-output equivalence check: confirm the JSON `RendererForTopology` produces is byte-identical whether the skip fires or not, for the same underlying report — extend `app/api_topology_test.go` or do a live before/after diff against a running `scope_app` (`curl`/websocket) as manual validation if a unit test isn't practical for the websocket path specifically.
+- [ ] Benchmark `collector.Report()`'s cache-hit path before/after with `go test -bench=. -benchmem ./app/...` (no such benchmark exists today — add one). This phase's Definition of Done needs a measured allocation/time reduction on the cache-hit path, not just "should be faster."
 
 **Commands:**
 ```bash
-go install golang.org/x/vuln/cmd/govulncheck@latest
-govulncheck ./...
-docker build -f docker/Dockerfile.scope -t scope:modernized .
+go test ./app/... -run TestCollector -v
+go test ./app/... -bench=BenchmarkCollectorReport -benchmem
+go build ./... && go vet ./...
 ```
 
-**Definition of Done:** `docker/Dockerfile.scope` builds from a currently-maintained base image, `govulncheck` shows no unaddressed high/critical findings, and the Weave Net integration's status (kept-and-updated vs. optional-and-deprioritized) is an explicit decision, not an accident.
+**Definition of Done:** `go build`/`go vet`/`go test ./...` clean; the three `TestCollector*` cases above pass, including the window-expiry-triggers-version-bump case; a benchmark shows a measured reduction in allocations/time for `collector.Report()`'s repeated-cache-hit path; rendered output confirmed identical with the skip enabled vs. disabled for the same data. Not urgent — correct only matters once someone actually keeps multiple UI tabs open against this deployment; still worth doing since it's now a fully scoped, low-risk change rather than a vague idea.
 
 ---
 
@@ -283,9 +322,14 @@ Phase 0 (CI baseline)
                                                   ├─▶ Phase 6 (cleanup)
           └─▶ Phase 4 (eBPF, isolated) ──────────┤
           └─▶ Phase 5 (Kubernetes)  ─────────────┘
+   └─▶ Phase 7 (report-serving efficiency, isolated)
 ```
 
 Phases 2 and 3 together are what actually deliver "works on the newest Docker
 runtime, including Swarm." Phase 4 (eBPF) and Phase 5 (Kubernetes) don't
 depend on each other or on Phase 3, so they can run in parallel once Phase 1
 is done. Treat Phase 6 as final polish, not a blocker for a working build.
+Phase 7 only depends on Phase 0 (a working baseline to test against) and is
+independent of everything else — it's not part of the original Docker/Swarm/
+Kubernetes modernization scope, it's a resource-efficiency finding from
+`DEPLOYMENT-PLAN.md` Stage 6, tracked here because it's a real code change.

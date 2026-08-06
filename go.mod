@@ -2,11 +2,13 @@ module github.com/weaveworks/scope
 
 go 1.26.0
 
+toolchain go1.26.5
+
 require (
 	camlistore.org v0.0.0-20171230002226-a5a65f0d8b22
 	github.com/NYTimes/gziphandler v1.1.1
-	github.com/armon/go-metrics v0.0.0-20190430140413-ec5e00d3c878
-	github.com/armon/go-radix v0.0.0-20160115234725-4239b77079c7
+	github.com/armon/go-metrics v0.4.1
+	github.com/armon/go-radix v1.0.0
 	github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5
 	github.com/aws/aws-sdk-go v1.15.78
 	github.com/bluele/gcache v0.0.0-20150827032927-fb6c0b0e1ff0
@@ -27,23 +29,22 @@ require (
 	github.com/gorilla/handlers v0.0.0-20151024084542-9a8d6fa6e647
 	github.com/gorilla/mux v1.6.2
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
-	github.com/hashicorp/consul v0.6.4-0.20160227001210-2a4436075dbb
-	github.com/hashicorp/go-cleanhttp v0.5.0
+	github.com/hashicorp/consul/api v1.28.2
+	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/k-sone/critbitgo v1.2.0
 	github.com/kr/pty v1.1.1
 	github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b
-	github.com/miekg/dns v0.0.0-20160129163459-3d66e3747d22
+	github.com/miekg/dns v1.1.41
 	github.com/mjibson/esc v0.2.0
 	github.com/moby/term v0.5.2
 	github.com/nats-io/nats v1.2.1-0.20160607194537-ce9cdc9addff
-	github.com/openebs/k8s-snapshot-client v0.0.0-20180831100134-a6506305fb16
 	github.com/opentracing-contrib/go-stdlib v0.0.0-20190519235532-cf7a6c988dc9
 	github.com/opentracing/opentracing-go v1.1.0
 	github.com/paypal/ionet v0.0.0-20130919195445-ed0aaebc5417
 	github.com/pborman/uuid v0.0.0-20150824212802-cccd189d45f7
 	github.com/peterbourgon/runsvinit v2.0.0+incompatible
 	github.com/pkg/errors v0.9.1
-	github.com/prometheus/client_golang v1.5.0
+	github.com/prometheus/client_golang v1.11.1
 	github.com/richo/GOSHOUT v0.0.0-20210103052837-9a2e452d4c18
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spaolacci/murmur3 v0.0.0-20150829172844-0d12bf811670
@@ -58,7 +59,7 @@ require (
 	github.com/weaveworks/go-checkpoint v0.0.0-20160428112813-62324982ab51
 	github.com/weaveworks/ps v0.0.0-20160725183535-70d17b2d6f76
 	github.com/weaveworks/tcptracer-bpf v0.0.0-20200114145059-84a08fc667c0
-	github.com/weaveworks/weave v2.3.1-0.20180427133448-4da998ab4507+incompatible
+	github.com/weaveworks/weave v2.6.3+incompatible
 	github.com/willdonnelly/passwd v0.0.0-20141013001024-7935dab3074c
 	golang.org/x/net v0.57.0
 	golang.org/x/sync v0.22.0
@@ -85,12 +86,13 @@ require (
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/fatih/camelcase v1.0.0 // indirect
+	github.com/fatih/color v1.14.1 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/fluent/fluent-logger-golang v1.5.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-errors/errors v1.4.2 // indirect
 	github.com/go-kit/kit v0.9.0 // indirect
-	github.com/go-logfmt/logfmt v0.4.0 // indirect
+	github.com/go-logfmt/logfmt v0.5.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
@@ -102,24 +104,28 @@ require (
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/context v1.1.1 // indirect
-	github.com/hashicorp/go-immutable-radix v1.0.0 // indirect
+	github.com/hashicorp/errwrap v1.1.0 // indirect
+	github.com/hashicorp/go-hclog v1.5.0 // indirect
+	github.com/hashicorp/go-immutable-radix v1.3.1 // indirect
 	github.com/hashicorp/go-msgpack v1.1.5 // indirect
-	github.com/hashicorp/golang-lru v0.5.0 // indirect
-	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/hashicorp/serf v0.7.1-0.20160225025727-b00b7b98ce2b // indirect
+	github.com/hashicorp/go-multierror v1.1.1 // indirect
+	github.com/hashicorp/go-rootcerts v1.0.2 // indirect
+	github.com/hashicorp/golang-lru v0.5.4 // indirect
+	github.com/hashicorp/serf v0.10.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/iovisor/gobpf v0.0.0-20180826141936-4ece6c56f936 // indirect
 	github.com/jmespath/go-jmespath v0.0.0-20160202185014-0b12d6b521d8 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/kr/logfmt v0.0.0-20140226030751-b84e30acd515 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/liggitt/tabwriter v0.0.0-20181228230101-89fcab3d43de // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
-	github.com/mattn/go-colorable v0.0.9 // indirect
-	github.com/mattn/go-isatty v0.0.4 // indirect
+	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/mattn/go-isatty v0.0.17 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
+	github.com/mitchellh/go-homedir v1.1.0 // indirect
+	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/sys/atomicwriter v0.1.0 // indirect
 	github.com/moby/sys/sequential v0.7.0 // indirect
@@ -136,8 +142,8 @@ require (
 	github.com/philhofer/fwd v1.0.0 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_model v0.2.0 // indirect
-	github.com/prometheus/common v0.9.1 // indirect
-	github.com/prometheus/procfs v0.0.8 // indirect
+	github.com/prometheus/common v0.26.0 // indirect
+	github.com/prometheus/procfs v0.6.0 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
@@ -157,6 +163,7 @@ require (
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/exp v0.0.0-20230817173708-d852ddb80c63 // indirect
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
@@ -166,7 +173,6 @@ require (
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
-	gopkg.in/yaml.v2 v2.3.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
 	k8s.io/cli-runtime v0.36.3 // indirect

@@ -10,5 +10,8 @@
 # independently supervised). Fine for now; revisit if/when this becomes the
 # global per-node agent deployment.
 set -e
+# --weave=false on both: --weave defaults to true and this image doesn't
+# bundle the weave/weaveutil binaries, so without it each process spams
+# "Error updating weaveDNS ... weave: executable file not found" forever.
 /usr/bin/scope --mode=probe --probe.docker=true --weave=false &
-exec /usr/bin/scope --mode=app
+exec /usr/bin/scope --mode=app --weave=false
