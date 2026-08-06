@@ -57,6 +57,7 @@ import {
 } from '../selectors/topology';
 import defaultTheme from '../themes/default';
 import contrastTheme from '../themes/contrast';
+import darkTheme from '../themes/dark';
 import { VIEWPORT_RESIZE_DEBOUNCE_INTERVAL } from '../constants/timer';
 import {
   ESC_KEY_CODE,
@@ -198,17 +199,26 @@ class App extends React.Component {
     const {
       isTableViewMode, isGraphViewMode, isResourceViewMode, showingDetails,
       showingHelp, showingNetworkSelector, showingTroubleshootingMenu,
-      timeTravelTransitioning, timeTravelSupported, contrastMode,
+      timeTravelTransitioning, timeTravelSupported, contrastMode, darkMode,
     } = this.props;
 
     const className = classNames('scope-app', {
       'contrast-mode': contrastMode,
+      'dark-mode': darkMode,
       'time-travel-open': timeTravelSupported,
     });
     const isIframe = window !== window.top;
+    // Contrast mode is a WCAG-style accessibility override, so it takes
+    // precedence over the dark theme if both are somehow on at once.
+    let activeTheme = defaultTheme;
+    if (contrastMode) {
+      activeTheme = contrastTheme;
+    } else if (darkMode) {
+      activeTheme = darkTheme;
+    }
 
     return (
-      <ThemeProvider theme={{...commonTheme, scope: contrastMode ? contrastTheme : defaultTheme }}>
+      <ThemeProvider theme={{...commonTheme, scope: activeTheme }}>
         <>
           <GlobalStyle />
 
@@ -267,6 +277,7 @@ function mapStateToProps(state) {
   return {
     contrastMode: state.get('contrastMode'),
     currentTopology: state.get('currentTopology'),
+    darkMode: state.get('darkMode'),
     isGraphViewMode: isGraphViewModeSelector(state),
     isResourceViewMode: isResourceViewModeSelector(state),
     isTableViewMode: isTableViewModeSelector(state),

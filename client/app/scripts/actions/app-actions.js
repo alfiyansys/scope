@@ -423,6 +423,16 @@ export function setContrastMode(enabled) {
   };
 }
 
+export function setDarkMode(enabled) {
+  return (dispatch, getState) => {
+    dispatch({
+      enabled,
+      type: ActionTypes.TOGGLE_DARK_MODE,
+    });
+    updateRoute(getState);
+  };
+}
+
 export function resetLocalViewState() {
   return (dispatch) => {
     dispatch({ type: ActionTypes.RESET_LOCAL_VIEW_STATE });

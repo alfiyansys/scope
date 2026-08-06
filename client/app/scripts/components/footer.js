@@ -8,7 +8,8 @@ import {
   clickForceRelayout,
   toggleHelp,
   toggleTroubleshootingMenu,
-  setContrastMode
+  setContrastMode,
+  setDarkMode
 } from '../actions/app-actions';
 
 
@@ -16,6 +17,11 @@ class Footer extends React.Component {
   handleContrastClick = (ev) => {
     ev.preventDefault();
     this.props.setContrastMode(!this.props.contrastMode);
+  }
+
+  handleDarkModeClick = (ev) => {
+    ev.preventDefault();
+    this.props.setDarkMode(!this.props.darkMode);
   }
 
   handleRelayoutClick = (ev) => {
@@ -28,11 +34,13 @@ class Footer extends React.Component {
 
   render() {
     const {
-      hostname, version, versionUpdate, contrastMode
+      hostname, version, versionUpdate, contrastMode, darkMode
     } = this.props;
 
     const otherContrastModeTitle = contrastMode
       ? 'Switch to normal contrast' : 'Switch to high contrast';
+    const otherDarkModeTitle = darkMode
+      ? 'Switch to light mode' : 'Switch to dark mode';
     const forceRelayoutTitle = 'Force re-layout (might reduce edge crossings, '
       + 'but may shift nodes around)';
     const versionUpdateTitle = versionUpdate
@@ -83,6 +91,13 @@ class Footer extends React.Component {
           </button>
           <button
             type="button"
+            onClick={this.handleDarkModeClick}
+            className="footer-icon"
+            title={otherDarkModeTitle}>
+            <i className={darkMode ? 'fa fa-sun-o' : 'fa fa-moon-o'} />
+          </button>
+          <button
+            type="button"
             onClick={this.props.toggleTroubleshootingMenu}
             className="footer-icon"
             title="Open troubleshooting menu"
@@ -107,6 +122,7 @@ class Footer extends React.Component {
 function mapStateToProps(state) {
   return {
     contrastMode: state.get('contrastMode'),
+    darkMode: state.get('darkMode'),
     hostname: state.get('hostname'),
     topologyViewMode: state.get('topologyViewMode'),
     version: state.get('version'),
@@ -120,6 +136,7 @@ export default connect(
     clickDownloadGraph,
     clickForceRelayout,
     setContrastMode,
+    setDarkMode,
     toggleHelp,
     toggleTroubleshootingMenu
   }
