@@ -22,6 +22,31 @@ person's fork, published in case it's useful to anyone else still running
 Scope. No affiliation with Weaveworks. Bug reports are welcome; fixes
 aren't guaranteed.
 
+The original upstream README, as archived at the point this fork started,
+is kept at [`README-original.md`](README-original.md).
+
+## What it looks like
+
+<img src="imgs/topology.png" width="200" alt="Map your architecture" align="right">
+
+Choose an overview of your container infrastructure, or focus on a specific
+microservice. Easily identify and correct issues to ensure the stability and
+performance of your containerized applications.
+
+<img src="imgs/selected.png" width="200" alt="Focus on a single container" align="right">
+
+View contextual metrics, tags, and metadata for your containers. Navigate
+between processes inside a container and the hosts they run on, in
+expandable, sortable tables. Find the container using the most CPU or
+memory for a given host or service.
+
+<img src="imgs/terminals.png" width="200" alt="Launch a command line" align="right">
+
+Interact with containers directly: pause, restart, and stop them, or launch
+a shell into one, all without leaving the browser.
+
+<br clear="right">
+
 ## Status
 
 Tracked in detail, phase by phase, in [`MODERNIZATION-PLAN.md`](MODERNIZATION-PLAN.md); that
