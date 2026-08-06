@@ -88,6 +88,7 @@ export function getUrlState(state) {
   const urlState = {
     contrastMode: state.get('contrastMode'),
     controlPipe: cp ? cp.toJS() : null,
+    darkMode: state.get('darkMode'),
     gridSortedBy: state.get('gridSortedBy'),
     gridSortedDesc: state.get('gridSortedDesc'),
     nodeDetails: nodeDetails.toJS(),
