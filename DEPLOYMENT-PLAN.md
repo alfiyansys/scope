@@ -193,3 +193,84 @@ Everything above is deployment/config-only. Actually read the Go code (`app/`, `
 - **pprof is already wired up, just not being used.** `prog/app.go:64` mounts `/debug/pprof` on the app's router (uses whatever `--app.basic-auth` is already configured, no separate lockdown). The probe has the same (`prog/probe.go:88-95`) but only if started with `--probe.http.listen=:<port>` (off by default). If any of the above is ever worth confirming with real numbers instead of reading code, `go tool pprof http://sm-qohelet.local:4040/debug/pprof/heap` against the live `scope_app` is already available with zero code changes.
 
 **None of these code-level findings are worth acting on before the deployment-level #1 (redundant probes)** — the websocket copy-per-tick only matters if several people keep the UI open at once, which isn't this deployment's actual usage pattern. Noted here so it's not silently missed, not because it's the priority.
+
+## Stage 6 — Resource consolidation (planned, not started)
+
+Turns the findings above into an ordered, executable plan. Each sub-phase has a validation gate before the next one starts — nothing here removes anything without first confirming the removal is safe, and every destructive step has a documented rollback. Sub-phase 6.4 (resource limits) doesn't depend on 6.1–6.3 and can run independently, any time.
+
+### 6.1 — Pre-cutover validation (read-only, fully reversible)
+
+**Why:** the whole plan rests on "the host-probe already sees everything the Swarm-managed probe sees" — confirm that with real API output before removing anything, not just from reading `tagger.go`.
+
+**Tasks:**
+- [ ] Snapshot current topology, filtered to the 3 worker nodes, before touching anything:
+  ```bash
+  curl -s http://sm-qohelet.local:4040/api/topology/swarm-services | jq '.nodes | keys' > /tmp/pre-swarm-services.json
+  curl -s http://sm-qohelet.local:4040/api/topology/containers | jq '.nodes | keys' > /tmp/pre-containers.json
+  curl -s http://sm-qohelet.local:4040/api/topology/hosts | jq '.nodes | keys' > /tmp/pre-hosts.json
+  ```
+- [ ] Save the exact running spec of `scope_probe` before any change, so 6.2's rollback is mechanical, not reconstructed from memory:
+  ```bash
+  docker service inspect scope_probe --format '{{json .Spec}}' > /tmp/scope_probe-spec-backup.json
+  ```
+- [ ] Scale `scope_probe` to 0 (not remove yet): `docker service scale scope_probe=0`
+- [ ] Wait at least 60s (4× the default `app.window` of 15s, safe margin past the report retention window) so no stale cached report masks the change.
+- [ ] Re-fetch the same three endpoints, diff against the `pre-*.json` snapshots. Same node/container/service keys present on all 3 worker nodes with `scope_probe` at 0 replicas = pass.
+- [ ] **Gate:** if the diff shows anything missing (a Swarm-service label, a container, a host) — stop here, do not proceed to 6.2. Restore `scope_probe` to 3 replicas and investigate why before revising this plan.
+- [ ] Restore `scope_probe` to 3 replicas regardless of outcome (`docker service scale scope_probe=3`) — this sub-phase makes no permanent change either way.
+
+**Definition of Done:** topology diff is clean with `scope_probe` at 0 replicas, backup spec saved, service restored to its original replica count.
+
+### 6.2 — Remove the `scope_probe` Swarm global service
+
+**Why:** confirmed redundant by 6.1; recovers ~157 MiB + its CPU share on `daya-regia`/`sw-david01`/`vanguard`, and eliminates the duplicate packet-capture and conntrack/proc-scanning overhead documented above.
+
+**Tasks (only after 6.1 passes):**
+- [ ] `docker service rm scope_probe`
+- [ ] Re-run the same topology diff from 6.1 once more, now against an actual removal rather than a scale-to-0 — confirm still clean.
+- [ ] `docker stats` on the 3 affected nodes, confirm the ~157 MiB recovery actually shows up (not just projected).
+- [ ] Update this file's Status table: retire the "Per-node probe agents (Swarm global service)" row, note coverage is now host-probe-only.
+
+**Rollback:** `docker service create` from the exact spec saved in 6.1 (`/tmp/scope_probe-spec-backup.json`) — mechanical, not reconstructed.
+
+**Definition of Done:** `scope_probe` absent from `docker service ls`, topology unchanged, memory recovery confirmed via `docker stats`, rollback spec exists and is verified parseable.
+
+### 6.3 — Drop `scope_app`'s bundled probe (code change, needs a rebuild)
+
+**Why:** `sm-qohelet` already runs its own separate `scope-host-probe` (Stage 3) — `scope_app`'s bundled `scope --mode=probe &` (`docker/entrypoint-deploy.sh`) is exactly the same redundancy as 6.2, just on the manager. Highest-value single cut since `sm-qohelet` is the tightest node in the fleet (2 vCPUs, shared with `traefik`/`portainer`/`dvr-window`/`mediamtx`).
+
+**Tasks:**
+- [ ] Edit `docker/entrypoint-deploy.sh`: drop the backgrounded `/usr/bin/scope --mode=probe --probe.docker=true --weave=false &` line, keep only `exec /usr/bin/scope --mode=app`. Update the file's own header comment (currently describes bundling app+probe) to match.
+- [ ] Commit on `dev` per `AGENTS.md` — this is a code change, not a live-infra-only action.
+- [ ] Rebuild and push a new image tag (same pattern as every prior image build): `docker build -f docker/Dockerfile.deploy -t ghcr.io/alfiyansys/scope:modernized-<new-short-sha> .`, push to GHCR, pre-pull on `sm-qohelet` before cutover (Stage 4's pattern).
+- [ ] Repeat 6.1's validation approach, scoped to `sm-qohelet`: snapshot its container/process topology with the current `scope_app` (bundled probe still running), then compare against what `scope-host-probe` alone reports for that node, before switching the image.
+- [ ] `docker service update --image ghcr.io/alfiyansys/scope:modernized-<new-short-sha> scope_app`
+- [ ] Verify: `docker exec <scope_app-container> ps` shows a single `scope --mode=app` process, not two. `sm-qohelet`'s topology in the UI unchanged. `docker stats` shows the drop.
+
+**Rollback:** `docker service update --image ghcr.io/alfiyansys/scope:modernized-8f6b5774 scope_app` — back to the current, known-good tag.
+
+**Definition of Done:** `scope_app` runs one process, `sm-qohelet` topology unaffected, memory/CPU drop confirmed.
+
+### 6.4 — Add resource limits (independent, can run any time)
+
+**Why:** cheap insurance regardless of 6.1–6.3 — bounds worst-case impact if report volume ever spikes, and (per the verified `runtime.SetDefaultGOMAXPROCS` behavior in this Go build — cgroup-quota-aware **by default**, confirmed via `go doc`) automatically right-sizes `GOMAXPROCS` too, no code change needed.
+
+**Tasks:**
+- [ ] Pick limits from **observed peaks with real headroom**, not a flat number copy-pasted across nodes — `daya-regia`'s host-probe legitimately bursts to ~17% of 12 vCPUs (≈2 vCPU-equivalent) because it sees real cross-container traffic (finding #5); a uniform tight limit would throttle exactly the node doing its job correctly. Suggested starting point, to be confirmed against a longer observation window before locking in: `scope_app` 512 MiB / 1 vCPU; host-probes 256 MiB / 1.5 vCPU (raised specifically because of `daya-regia`'s observed burst, not a guess).
+- [ ] Apply: `docker service update --limit-memory --limit-cpu` for `scope_app` (and `scope_probe`, if 6.2 hasn't happened yet or is reverted); add `--memory`/`--cpus` to the `docker run` command for every `scope-host-probe` recreation (same pattern as Stages 3/4/5).
+- [ ] Monitor for at least 24h after applying — a limit set too tight shows up as `OOMKilled` or CPU-throttling in `docker inspect`/`docker service ps --no-trunc`, not immediately.
+
+**Rollback:** `docker service update --limit-memory 0 --limit-cpu 0` / recreate host-probes without the flags.
+
+**Definition of Done:** explicit limits present on every scope container fleet-wide, zero OOM-kills or throttling observed over a 24h window.
+
+### 6.5 — Re-baseline and close out
+
+**Tasks:**
+- [ ] Re-run the same `docker stats` measurement across all 5 nodes used for the original baseline table above.
+- [ ] Add a second table (or update the existing one) showing before/after side by side.
+- [ ] Confirm actual recovered memory/CPU matches what 6.2/6.3 projected — if it doesn't, say so and explain the gap rather than silently updating the number.
+
+**Definition of Done:** fleet-wide footprint measurably reduced, no functional regression in any topology view across all 5 nodes, resource limits in place, and the two latent findings (duplicate packet capture, Swarm probes never getting the eBPF fix) are resolved as a side effect of removal — not patched independently, since the probes causing them are gone.
+
+**Execution order:** 6.1 → 6.2 → 6.3 in sequence (each gates the next); 6.4 can run in parallel with any of them or first; 6.5 last, after everything else lands.
