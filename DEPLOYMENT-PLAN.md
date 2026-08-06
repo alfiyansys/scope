@@ -140,4 +140,41 @@ docker run -d --name scope-host-probe --restart=always \
 
 **Not done:** no systemd unit (same accepted gap as Stage 3 — `--restart=always` covers daemon restarts, not host reboots unless Docker itself is enabled at boot, which it is on other nodes by distro default but wasn't specifically verified here).
 
+## Resource usage baseline & optimization plan (2026-08-06)
+
+Measured live via `docker stats --no-stream` across every node currently running a scope process — the 4 Swarm members plus `aqila-linvis` (Stage 5). Not yet acted on; this is the plan, execution is future work.
+
+**Baseline snapshot:**
+
+| Node | vCPUs | Container | CPU % | Mem | Mem % | PIDs |
+|---|---|---|---|---|---|---|
+| `sm-qohelet` (manager) | 2 | `scope_app` (app + bundled probe) | 4.83% | 262.5 MiB | 13.34% | 22 |
+| `sm-qohelet` | 2 | `scope-host-probe` | 2.88% | 88.2 MiB | 4.48% | 14 |
+| `daya-regia` | 12 | `scope_probe` (Swarm global) | 0.53% | 54.2 MiB | 0.17% | 21 |
+| `daya-regia` | 12 | `scope-host-probe` | 13.83% | 138.9 MiB | 0.43% | 22 |
+| `sw-david01` | 4 | `scope_probe` (Swarm global) | 0.92% | 52.2 MiB | 1.33% | 15 |
+| `sw-david01` | 4 | `scope-host-probe` | 2.68% | 57.1 MiB | 1.46% | 15 |
+| `vanguard` | 4 | `scope_probe` (Swarm global) | 0.28% | 51.1 MiB | 0.32% | 14 |
+| `vanguard` | 4 | `scope-host-probe` | 2.48% | 56.4 MiB | 0.35% | 15 |
+| `aqila-linvis` (Tailscale) | 4 | `scope-host-probe` | 6.19% | 58.1 MiB | 0.74% | 15 |
+
+Fleet total: ~819 MiB resident across 9 processes on 5 hosts. No single node is under real memory pressure from this today — the finding here is about avoidable duplication and unbounded worst-case, not a current outage risk.
+
+**1. Every Swarm node runs two full probes doing overlapping work — the biggest lever.** `scope-host-probe` (Stage 3) was added *specifically because* Swarm-managed probes structurally can't get `--net=host`/`--pid=host` and therefore can't see real cross-container traffic (Stage 2's own finding). Since then, every node has kept running *both*: the original Swarm-managed probe (`scope_probe` global service on the 3 workers; `scope_app`'s bundled probe, launched via `docker/entrypoint-deploy.sh`'s backgrounded `scope --mode=probe &`, on the manager) *and* the strictly-more-capable host-probe. The host-probe's container/process topology comes from the same `--probe.docker=true` + `/proc` scanning either way — the Swarm-managed probes aren't seeing anything unique, just a subset.
+   - Dropping the `scope_probe` global service entirely would recover ~157 MiB (54.2 + 52.2 + 51.1) plus its CPU share across `daya-regia`/`sw-david01`/`vanguard`, for zero loss of visibility.
+   - `scope_app`'s bundled probe (confirmed `--no-probe` exists as a flag) could be dropped from `entrypoint-deploy.sh` the same way, redundant with `sm-qohelet`'s own separate `scope-host-probe` — the highest-value cut since `sm-qohelet` is the most CPU-constrained node in the fleet (2 vCPUs) *and* shares it with real workloads (`traefik`, `portainer`, `dvr-window`, `mediamtx`).
+   - **Before cutting anything:** validate that `tagger.go`'s Swarm-service-node labeling (container-label-based, confirmed in Phase 3) still populates correctly from the host-probe alone — expected to, since it reads the same container labels regardless of which probe container does the reading, but should be confirmed against a real `/api/topology/swarm-services` check before removing the Swarm-managed probes, not assumed.
+
+**2. No CPU or memory limits are configured anywhere.** Swarm services show `Limits: {}`/`Reservations: {}`; `scope-host-probe`'s plain `docker run` sets no `--memory`/`--cpus` either. Not an active problem today, but `scope_app` is already the single heaviest container measured (4.83% CPU / 13.34% of node memory) on the one node with the least headroom to give, with no ceiling if report volume spikes. Setting explicit limits (Swarm `Resources.Limits`, `docker run --memory --cpus`) bounds the worst case and is close to free to add.
+
+**3. `GOMAXPROCS` is unconstrained, most visible on `daya-regia` (12 vCPUs).** A single-purpose collector defaults to matching the whole host's core count, more GC/scheduler overhead than this workload needs. Fixing #2 (real CPU limits) is the clean way to address this too — the Go runtime this fork builds with is cgroup-quota-aware, so it right-sizes `GOMAXPROCS` automatically once a real quota exists, rather than needing a hardcoded value.
+
+**4. Tunable report/spy intervals exist and are still at their defaults.** `--probe.publish.interval` (default `3s`) and `--probe.spy.interval` (default `1s`) trade topology freshness for CPU/network directly, with no code change needed — a safe, reversible lever if any node needs throttling later. Not recommending changing these now (nothing currently justifies it); noting them since they're the easiest knob available if #1 alone doesn't create enough headroom.
+
+**5. `scope-host-probe`'s CPU cost tracks real traffic volume, not waste.** `daya-regia`'s 13.83% vs. the other nodes' ~2.5–6% lines up with it being the node seeing the most real cross-container/BitTorrent/VPN/RTSP traffic (Stage 3's own 771-endpoint count was measured there). This is the tool doing its job, not a leak — the interval tuning in #4 is the lever if this specific node ever needs to be throttled back.
+
+**6. Image size (145 MB)** is a secondary, disk/pull-time concern rather than a runtime CPU/memory one — cross-references `MODERNIZATION-PLAN.md` Phase 6's still-open `Dockerfile.scope`-vs-`Dockerfile.deploy` base-image decision rather than duplicating it here.
+
+**Priority order for execution (not yet done):** #1 (drop redundant Swarm-managed probes, after the `tagger.go` validation check) is the only change with a real, measurable payoff; #2 is cheap insurance worth doing alongside it; #3 falls out of #2 for free; #4 and #5 are informational, act on them only if #1 doesn't create enough headroom on `sm-qohelet` specifically.
+
 **Definition of Done:** met. `aqila-linvis` runs a probe reporting into the existing central `scope_app`, visible in the UI as a 5th host, without any change to Swarm membership or the other 4 nodes.
