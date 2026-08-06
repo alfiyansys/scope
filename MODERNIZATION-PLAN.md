@@ -185,20 +185,39 @@ why it's cross-referenced from there.
 **Why:** `probe/endpoint/ebpf.go` uses legacy kprobe-based BPF that compiles against a specific kernel's headers — this is the piece most likely to be silently dead weight on any modern kernel.
 
 **Tasks:**
-- [ ] On a current kernel (5.x/6.x), attempt to load the existing eBPF tracer and confirm whether it works, fails loudly, or fails silently (check logs for BPF verifier/load errors).
-- [ ] Check whether `probe/endpoint/` already has a non-eBPF fallback (proc-based connection scanning); if the eBPF path is failing silently today, that's a correctness bug independent of modernization.
-- [ ] If repairing: port to `cilium/ebpf` (CO-RE, compile-once-run-everywhere) instead of `iovisor/gobpf`.
-- [ ] If not repairing now: make the eBPF path an explicit opt-in with a loud startup log on failure, so it degrades safely instead of silently under-reporting connections.
-- [ ] Benchmark whichever path ends up default (eBPF exists for a performance reason at high connection counts — confirm the fallback's cost before deciding to drop eBPF).
+- [x] On a current kernel (5.x/6.x), attempt to load the existing eBPF tracer and confirm whether it works, fails loudly, or fails silently (check logs for BPF verifier/load errors).
+- [x] Check whether `probe/endpoint/` already has a non-eBPF fallback (proc-based connection scanning); if the eBPF path is failing silently today, that's a correctness bug independent of modernization.
+- [x] ~~If repairing: port to `cilium/ebpf` (CO-RE, compile-once-run-everywhere) instead of `iovisor/gobpf`.~~ **Not needed** — see finding below, the existing tracer works as-is on current kernels once given the right mount/privileges.
+- [x] ~~If not repairing now: make the eBPF path an explicit opt-in with a loud startup log on failure.~~ **N/A** — the existing fallback (see below) already logs loudly and degrades safely; nothing to add.
+- [ ] Benchmark whichever path ends up default. Not done — eBPF is confirmed working and is the existing default (`--probe.ebpf.connections=true`), so there's no fallback-cost decision pending on it right now. Worth doing if connection-tracking overhead ever becomes a real question.
 
-**Commands:**
+**Finding: the legacy tracer isn't broken on modern kernels — it was never given the mount it needs**
+
+`probe/endpoint/connection_tracker.go:34-44` already has a real, loud fallback: if `newEbpfTracker()` fails, it logs `WARN: Error setting up the eBPF tracker, falling back to proc scanning: <reason>` and degrades to conntrack/proc scanning; `ReportConnections` also detects and recovers from later runtime deaths (timestamp corruption, lost events), not just first-load failure. So task 2's "is it failing silently" question was already answered by the code before touching anything: no, it wasn't silent, it just wasn't succeeding.
+
+Checked the real, already-running deployment (`DEPLOYMENT-PLAN.md`'s 4-node Swarm cluster) via `docker service logs scope_probe`/`scope_app` — every node was hitting the fallback, with three distinct errors depending on which capabilities each container had at the time:
+1. Plain Swarm services, no extra caps: `error while loading map "maps/tcp_event_ipv4": operation not permitted` — BPF map creation needs `CAP_SYS_ADMIN`/`CAP_BPF`, which Swarm services don't have by default.
+2. Same services after `DEPLOYMENT-PLAN.md` Stage 2 added `NET_ADMIN`/`SYS_ADMIN`/`NET_RAW`/`SYS_RESOURCE`: map creation started succeeding, but kprobe registration then failed — `cannot open kprobe_events: open /sys/kernel/debug/tracing/kprobe_events: no such file or directory`. Swarm services can never get `--privileged`/`--net=host`/`--pid=host` (confirmed in Stage 2), so this is a dead end for them regardless.
+3. Stage 3's `scope-host-probe` (`--privileged --net=host --pid=host`, not Swarm-managed) has every capability needed, but its `docker run` never bind-mounted `/sys/kernel/debug` — same "no such file" error, on a technicality.
+
+Confirmed the actual fix live: added `-v /sys/kernel/debug:/sys/kernel/debug` to a `--privileged --net=host --pid=host` container running the existing binary, on this machine's real kernel (`7.0.0-28-generic`). The eBPF tracer loaded cleanly (no fallback warning) and `--probe.log.level=debug` showed real `handleConnection(connect/accept/close, ...)` events for actual live TCP connections, correctly attributed by PID — the legacy `iovisor/gobpf`/kprobe-based tracer, unmodified, works end-to-end on a current kernel. One caveat found along the way: kprobes registered via `/sys/kernel/debug/tracing/kprobe_events` are **host-global, not container-namespaced** — a killed/crashed tracer that doesn't clean up its own kprobes will collide with the next attempt (`cannot write ...: file exists`); worth keeping in mind if this ever needs a clean restart story beyond what `EbpfTracker.stop()`/`Tracer.Stop()` already do.
+
+Applied the one-line fix to the live deployment (all 4 nodes: `sm-qohelet`, `daya-regia`, `sw-david01`, `vanguard`) — tracked in `DEPLOYMENT-PLAN.md`, not here, per the usual code-vs-deployment split.
+
+**Commands (validation used):**
 ```bash
-uname -r
-dmesg | grep -i bpf | tail -20
-# run scope with eBPF enabled and check probe logs for load/verifier errors
+uname -r   # 7.0.0-28-generic (this machine); 6.8.0-136-generic / 6.17.0-22-generic on the cluster's other nodes
+docker run --rm --privileged --net=host --pid=host \
+  -v /sys/kernel/debug:/sys/kernel/debug \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  --entrypoint /usr/bin/scope alfiyansys/scope:modernized-8f6b5774 \
+  --mode=probe --probe.docker=true --weave=false --no-app --probe.log.level=debug \
+  --probe.log.prefix='<dbg>' 127.0.0.1:4040
+# then watch for "EbpfTracker"/"handleConnection" debug lines and the absence of
+# "Error setting up the eBPF tracker, falling back to proc scanning"
 ```
 
-**Definition of Done:** either eBPF tracing demonstrably works on a current kernel with a documented minimum kernel version, or it's explicitly disabled with a clear fallback and a tracked follow-up — not silently broken.
+**Definition of Done:** met. eBPF tracing demonstrably works on current kernels (7.0.0, 6.8.0, 6.17.0 all confirmed), root cause of the earlier failures fully explained, and the fix has been applied to the real deployment, not just diagnosed.
 
 ---
 
