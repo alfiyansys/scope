@@ -258,18 +258,29 @@ go build ./... && go test ./...
 **Why:** cosmetic/hygiene relative to Phases 1–5, but blocks a trustworthy release artifact.
 
 **Tasks:**
-- [ ] Replace `FROM weaveworks/cloud-agent` in `docker/Dockerfile.scope` with a maintained base (plain `alpine`, explicit `runit` package install, or drop `runit` and run app+probe as separate processes/containers).
-- [ ] Decide fate of the Weave Net overlay integration (`app/weave.go`, vendored `weaveworks/weave` v2.3.1): Weave Net is itself unmaintained, so either update the vendored version or make the integration clearly optional/off-by-default and stop building it in by default.
-- [ ] Run `govulncheck ./...` and address flagged deps — known-stale candidates already visible in `go.mod`: `hashicorp/consul` (pre-1.0 pin), `nats-io/nats` (pre-1.0 client), `aws/aws-sdk-go` v1 (consider v2 if the ECS probe code is kept).
+- [x] Replace `FROM weaveworks/cloud-agent` in `docker/Dockerfile.scope` with a maintained base — **decided not to** (asked the user directly). `docker/Dockerfile.deploy` has been the real production build path since Stage 1, specifically built to avoid `Dockerfile.scope`'s Alpine/musl + bundled-Weave-Net packaging; nothing in `DEPLOYMENT-PLAN.md` uses or depends on `Dockerfile.scope` building. Marked it as superseded with an explanatory comment instead of investing in a fix nobody needs.
+- [x] Decide fate of the Weave Net overlay integration — **deprioritized, not dropped**: it's already off by default everywhere this fork actually runs (`--weave=false` on every deployment command in `DEPLOYMENT-PLAN.md`). Bumped the vendored `weaveworks/weave` v2.3.1 → v2.6.3 anyway since it was a real, cheap CVE fix (see below), but no further investment in the feature itself.
+- [x] Run `govulncheck ./...` and address flagged deps. **28 → 3 vulnerabilities.** The plan's original candidate list (`hashicorp/consul`, `nats-io/nats`, `aws/aws-sdk-go` v1) was written before actually running the tool — `nats-io/nats` and `aws/aws-sdk-go` v1 are still old but **weren't flagged** by govulncheck (no disclosed CVE matches their pinned versions), so left alone; bumping `aws-sdk-go` to v2 would be its own large migration (same shape as Phase 5's `client-go` bump) and wasn't actually required by this task's Definition of Done, so not done here.
 
-**Commands:**
+**What govulncheck actually found and what was done about each:**
+- `github.com/prometheus/client_golang` v1.5.0 → **v1.11.1**: safe, no behavior change.
+- `github.com/miekg/dns` (2016 vintage) → **v1.1.25**: safe, no behavior change.
+- `github.com/hashicorp/consul` v0.6.4 (pre-1.0, only reachable through `app/multitenant/consul_client.go` — Weave-Cloud-era code, "not relevant to this fork's goals" per `AGENTS.md`) → the old monolithic module was fully dropped and replaced with the standalone `github.com/hashicorp/consul/api` **v1.28.2** module it split into years ago. Not a version bump so much as following where the package actually moved.
+- `github.com/weaveworks/weave` v2.3.1 → **v2.6.3**, per the deprioritized-not-dropped decision above.
+- Several stdlib CVEs (`crypto/tls`, `crypto/x509`, `html/template`, `mime`, `net`, `net/http`) had nothing to do with this project's own dependencies at all — they were fixed in Go point releases past what was locally installed. Pinned an explicit `toolchain go1.26.5` directive in `go.mod` (was implicitly `go1.26.2`); `go`'s `GOTOOLCHAIN=auto` downloaded it automatically on the next build. `tools/build/golang/Dockerfile` should track this too, adding to the already-open follow-up from Phase 1/2/5 about that file drifting behind the module graph's actual `go`/`toolchain` requirement.
+- `github.com/docker/docker` (already latest, `v28.5.2`, from Phase 2) — the remaining 3 findings (`docker cp` symlink race, Moby AuthZ plugin bypass, an off-by-one in Moby's plugin privilege validation) have **no fix available** (`Fixed in: N/A`) and are daemon-side Moby behaviors — this project only imports the client SDK, never runs a daemon or implements AuthZ plugins, so these aren't reachable through this project's actual usage even though `govulncheck`'s call-graph analysis flags the import path. Accepted as-is; nothing actionable here.
+
+**Also found and fixed while starting this phase, unrelated to any dependency bump:** `docker/entrypoint-deploy.sh` was only passing `--weave=false` to the probe half of `scope_app`'s bundled processes, not the app half — since `--weave` defaults to `true` and this image doesn't bundle the `weave`/`weaveutil` binaries, the app process has been logging `Error updating weaveDNS ... weave: executable file not found` on a repeating backoff since Stage 1, present in every deployment stage's logs throughout this whole modernization effort and previously dismissed as noise. Fixed by adding `--weave=false` to both halves.
+
+**Commands (validation used):**
 ```bash
 go install golang.org/x/vuln/cmd/govulncheck@latest
-govulncheck ./...
-docker build -f docker/Dockerfile.scope -t scope:modernized .
+govulncheck ./...   # 28 vulnerabilities from 5 modules, before
+govulncheck ./...   # 3 vulnerabilities from 1 module (docker/docker, no fix available), after
+go build ./... && go vet ./... && go test ./...
 ```
 
-**Definition of Done:** `docker/Dockerfile.scope` builds from a currently-maintained base image, `govulncheck` shows no unaddressed high/critical findings, and the Weave Net integration's status (kept-and-updated vs. optional-and-deprioritized) is an explicit decision, not an accident.
+**Definition of Done:** met, with explicit decisions recorded rather than silent scope-narrowing. `docker/Dockerfile.scope`'s fate is decided (superseded, not fixed) rather than an accident; Weave Net's status is an explicit decision (deprioritized, not dropped, still patched); `govulncheck` findings addressed everywhere a fix existed and was reachable through this project's actual usage, with the 3 remaining ones documented as accepted (no fix exists, not applicable to client-only usage) rather than silently ignored.
 
 ---
 
