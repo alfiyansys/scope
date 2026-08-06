@@ -140,6 +140,8 @@ docker run -d --name scope-host-probe --restart=always \
 
 **Not done:** no systemd unit (same accepted gap as Stage 3 — `--restart=always` covers daemon restarts, not host reboots unless Docker itself is enabled at boot, which it is on other nodes by distro default but wasn't specifically verified here).
 
+**Definition of Done:** met. `aqila-linvis` runs a probe reporting into the existing central `scope_app`, visible in the UI as a 5th host, without any change to Swarm membership or the other 4 nodes.
+
 ## Resource usage baseline & optimization plan (2026-08-06)
 
 Measured live via `docker stats --no-stream` across every node currently running a scope process — the 4 Swarm members plus `aqila-linvis` (Stage 5). Not yet acted on; this is the plan, execution is future work.
@@ -177,4 +179,13 @@ Fleet total: ~819 MiB resident across 9 processes on 5 hosts. No single node is 
 
 **Priority order for execution (not yet done):** #1 (drop redundant Swarm-managed probes, after the `tagger.go` validation check) is the only change with a real, measurable payoff; #2 is cheap insurance worth doing alongside it; #3 falls out of #2 for free; #4 and #5 are informational, act on them only if #1 doesn't create enough headroom on `sm-qohelet` specifically.
 
-**Definition of Done:** met. `aqila-linvis` runs a probe reporting into the existing central `scope_app`, visible in the UI as a 5th host, without any change to Swarm membership or the other 4 nodes.
+### Code-level findings (not just deployment config)
+
+Everything above is deployment/config-only. Actually read the Go code (`app/`, `probe/`, `report/`) for code-level resource costs, not just guessed — each finding below is cited against real lines, verified by reading the file, not inferred:
+
+- **Real finding: the app does a full deep-copy of the merged report on every websocket tick, unconditionally.** `app/api_topology.go:139` ticks every `websocketLoop = 1*time.Second` (line 22) per open browser tab; each tick calls `wc.update()` → `wc.rep.Report()` → `app/collector.go:146` (cache hit) or `:157` (fresh merge) — both paths return `c.cached.Copy()`, a full deep copy of every `Topology`'s node map (`report/topology.go`'s `Copy()`, which allocates a fresh `map[string]Node` per topology). There's no dirty-check before this — it re-copies and re-renders even if nothing changed since the last tick. Cost scales with (open UI tabs) × (report size) × 1/sec. For this deployment's actual usage (a personal dashboard, realistically 0-1 tabs open most of the time) this is a real inefficiency but a low-impact one; would matter more if multiple people kept the UI open simultaneously.
+- **Minor hygiene nit, not a real leak:** `probe/endpoint/resolver.go:36` uses the classic `time.Tick(time.Second/10)` anti-pattern (no way to `Stop()` it) for reverse-DNS throttling. Harmless in practice since it's a process-lifetime singleton, not something that accumulates, but `time.NewTicker` + deferred `Stop()` would be the idiomatic fix if this file is ever touched for another reason.
+- **Merge/codec paths checked and are fine:** `app/merger.go`'s `fastMerger.Merge` mutates in place (`UnsafeMerge`) rather than copying, and `report/topology.go`'s `Nodes.Merge` is O(n) per topology, not quadratic — no algorithmic issue found. The hand-written codec methods added across Phase 1 (`report/node_set.go`, `report/sets.go`, `report/backcompat.go`) all delegate to the generated codecgen path deliberately; no reflection-fallback smell.
+- **pprof is already wired up, just not being used.** `prog/app.go:64` mounts `/debug/pprof` on the app's router (uses whatever `--app.basic-auth` is already configured, no separate lockdown). The probe has the same (`prog/probe.go:88-95`) but only if started with `--probe.http.listen=:<port>` (off by default). If any of the above is ever worth confirming with real numbers instead of reading code, `go tool pprof http://sm-qohelet.local:4040/debug/pprof/heap` against the live `scope_app` is already available with zero code changes.
+
+**None of these code-level findings are worth acting on before the deployment-level #1 (redundant probes)** — the websocket copy-per-tick only matters if several people keep the UI open at once, which isn't this deployment's actual usage pattern. Noted here so it's not silently missed, not because it's the priority.
