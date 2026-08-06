@@ -14,6 +14,14 @@ fork exists to bring the same tool back to working order against current
 Docker Engine, Docker Swarm, and Kubernetes**, without changing what Scope
 actually does.
 
+**This is a personal fork of an unmaintained project, not an official or
+community-governed successor.** Same situation described in
+[weaveworks/scope#3921](https://github.com/weaveworks/scope/issues/3921):
+there's no roadmap and no commitment to maintain this long-term — it's one
+person's fork, published in case it's useful to anyone else still running
+Scope. No affiliation with Weaveworks. Bug reports are welcome; fixes
+aren't guaranteed.
+
 ## Status
 
 Tracked in detail, phase by phase, in [`MODERNIZATION-PLAN.md`](MODERNIZATION-PLAN.md) — that
