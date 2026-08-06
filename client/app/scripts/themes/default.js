@@ -19,6 +19,7 @@ const defaultTheme = {
   edgeHighlightOpacity: 0.1,
   labelBackgroundColor: transparentize(0.3, theme.colors.purple25),
   linkOpacityDefault: 0.8,
+  logoBackingColor: 'transparent',
   nodeElementsInBackgroundOpacity: 0.7,
   panelBackgroundColor: theme.colors.white,
   terminalHeaderHeight: '44px',

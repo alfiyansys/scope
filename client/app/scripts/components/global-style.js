@@ -237,6 +237,8 @@ const GlobalStyle = createGlobalStyle`
           height: 64px;
           max-width: 250px;
           min-width: 0;
+          background-color: ${scopeTheme('logoBackingColor')};
+          border-radius: ${props => props.theme.borderRadius.soft};
         }
       }
     }
