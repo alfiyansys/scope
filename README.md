@@ -45,6 +45,12 @@ memory for a given host or service.
 Interact with containers directly: pause, restart, and stop them, or launch
 a shell into one, all without leaving the browser.
 
+<img src="imgs/dark-mode-selected.png" width="200" alt="Dark mode" align="right">
+
+This fork also adds a dark mode toggle (footer icon) — not in upstream
+Weave Scope. Node shapes, label plates, and the node-details panel all
+follow the theme; screenshotted live off this fork's own deployment.
+
 <br clear="right">
 
 ## Status
