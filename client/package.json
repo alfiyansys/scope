@@ -79,6 +79,7 @@
     "jest-cli": "^26.6.3",
     "json-loader": "0.5.7",
     "mockdate": "2.0.2",
+    "patch-package": "^8.0.1",
     "postcss-loader": "3.0.0",
     "react-router": "^3.2.6",
     "style-loader": "0.23.0",
@@ -96,6 +97,7 @@
     "webpack-hot-middleware": "2.25.0"
   },
   "scripts": {
+    "postinstall": "patch-package",
     "build": "webpack --config webpack.production.config.js",
     "build-external": "EXTERNAL=true webpack --config webpack.production.config.js",
     "copy-pkg-files": "cp package.json build-pkg/",

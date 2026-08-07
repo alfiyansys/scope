@@ -71,6 +71,7 @@ class NodeContainer extends React.Component {
         size={this.props.size}
         isAnimated={this.props.isAnimated}
         contrastMode={this.props.contrastMode}
+        darkMode={this.props.darkMode}
         forceSvg={this.props.exportingGraph}
         searchTerms={this.props.searchTerms}
         metricColor={getMetricColor(metric)}
@@ -93,6 +94,7 @@ function mapStateToProps(state) {
   return {
     contrastMode: state.get('contrastMode'),
     currentTopology: state.get('currentTopology'),
+    darkMode: state.get('darkMode'),
     exportingGraph: state.get('exportingGraph'),
     searchTerms: [state.get('searchQuery')],
     showingNetworks: state.get('showingNetworks'),
