@@ -78,6 +78,22 @@ made the entire "Services" tab disappear even though the underlying data
 was correct. Details and root causes are in `MODERNIZATION-PLAN.md`'s
 per-phase write-ups, not repeated here.
 
+The client (browser UI) got a dark mode toggle (2026-08-06): a Redux
+`darkMode` flag flows through a `ThemeProvider` covering the node-details
+panel, help panel, overlays, and footer. Checking it live the next day
+turned up two bugs that only show up once dark mode is actually used
+against real data: selecting a node washed the *entire* page — including
+the top nav bar — light gray, because the full-canvas selection overlay
+read a hardcoded light color instead of the app's theme; and every
+topology-graph node rendered as a stark white box regardless of theme,
+because the node shapes and label plates come from a pinned third-party
+dependency (`weaveworks-ui-components`) that hardcodes white fills with no
+theme hook at all. Fixed the former in-repo, and the latter via a
+`patch-package` patch (`client/patches/weaveworks-ui-components+0.22.8.patch`)
+threading a `darkMode` prop through the same path the existing
+`contrastMode` accessibility mode already uses. Both fixes are live on the
+production deployment.
+
 ## Architecture
 
 ```

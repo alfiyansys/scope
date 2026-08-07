@@ -1,0 +1,203 @@
+diff --git a/node_modules/weaveworks-ui-components/lib/components/GraphNode/GraphNode.js b/node_modules/weaveworks-ui-components/lib/components/GraphNode/GraphNode.js
+index 3446064..c5c69da 100644
+--- a/node_modules/weaveworks-ui-components/lib/components/GraphNode/GraphNode.js
++++ b/node_modules/weaveworks-ui-components/lib/components/GraphNode/GraphNode.js
+@@ -138,6 +138,11 @@ GraphNode.propTypes = {
+    */
+   cursorType: _propTypes["default"].string,
+ 
++  /**
++   * Renders the node in dark mode
++   */
++  darkMode: _propTypes["default"].bool,
++
+   /**
+    * Displays all the node labels as SVG elements
+    */
+@@ -257,6 +262,7 @@ GraphNode.defaultProps = {
+   color: _theme["default"].colors.purple400,
+   contrastMode: false,
+   cursorType: 'pointer',
++  darkMode: false,
+   forceSvg: false,
+   graphNodeRef: undefined,
+   highlighted: false,
+diff --git a/node_modules/weaveworks-ui-components/lib/components/GraphNode/_GraphNodeStatic.js b/node_modules/weaveworks-ui-components/lib/components/GraphNode/_GraphNodeStatic.js
+index 14a6a06..789a400 100644
+--- a/node_modules/weaveworks-ui-components/lib/components/GraphNode/_GraphNodeStatic.js
++++ b/node_modules/weaveworks-ui-components/lib/components/GraphNode/_GraphNodeStatic.js
+@@ -116,11 +116,13 @@ var SvgTextContainer = _styledComponents["default"].g.attrs(function (_ref) {
+ 
+ var LabelSvg = _styledComponents["default"].text.attrs(function (_ref2) {
+   var contrastMode = _ref2.contrastMode,
++      darkMode = _ref2.darkMode,
+       _ref2$theme$colors = _ref2.theme.colors,
+       black = _ref2$theme$colors.black,
++      gray50 = _ref2$theme$colors.gray50,
+       purple800 = _ref2$theme$colors.purple800;
+   return {
+-    fill: contrastMode ? black : purple800,
++    fill: contrastMode ? black : darkMode ? gray50 : purple800,
+     textAnchor: 'middle',
+     y: -38
+   };
+@@ -133,7 +135,7 @@ var LabelSvg = _styledComponents["default"].text.attrs(function (_ref2) {
+ 
+ var LabelMinorSvg = _styledComponents["default"].text.attrs({
+   fill: function fill(props) {
+-    return props.contrastMode ? props.theme.colors.black : props.theme.colors.purple600;
++    return props.contrastMode ? props.theme.colors.black : props.darkMode ? props.theme.colors.purple200 : props.theme.colors.purple600;
+   },
+   textAnchor: 'middle',
+   y: -20
+@@ -153,7 +155,7 @@ var LabelTemplate = _styledComponents["default"].div.withConfig({
+   displayName: "_GraphNodeStatic__LabelTemplate",
+   componentId: "xnsael-5"
+ })(["background-color:", ";border-radius:", ";overflow:hidden;text-overflow:ellipsis;display:inline-block;text-align:center;padding:2px 10px;max-width:100%;pointer-events:all;", ";"], function (props) {
+-  return (0, _polished.transparentize)(0.2, props.contrastMode ? props.theme.colors.white : props.theme.colors.purple25);
++  return (0, _polished.transparentize)(0.2, props.contrastMode ? props.theme.colors.white : props.darkMode ? props.theme.colors.purple900 : props.theme.colors.purple25);
+ }, function (props) {
+   return props.theme.borderRadius.soft;
+ }, function (props) {
+@@ -164,7 +166,7 @@ var LabelStandard = (0, _styledComponents["default"])(LabelTemplate).withConfig(
+   displayName: "_GraphNodeStatic__LabelStandard",
+   componentId: "xnsael-6"
+ })(["color:", ";font-size:", ";margin-top:4px;"], function (props) {
+-  return props.contrastMode ? props.theme.colors.black : props.theme.colors.purple800;
++  return props.contrastMode ? props.theme.colors.black : props.darkMode ? props.theme.colors.gray50 : props.theme.colors.purple800;
+ }, function (props) {
+   return props.theme.fontSizes.normal;
+ });
+@@ -172,7 +174,7 @@ var LabelMinorStandard = (0, _styledComponents["default"])(LabelTemplate).withCo
+   displayName: "_GraphNodeStatic__LabelMinorStandard",
+   componentId: "xnsael-7"
+ })(["color:", ";font-size:", ";margin-top:-7px;"], function (props) {
+-  return props.contrastMode ? props.theme.colors.black : props.theme.colors.purple600;
++  return props.contrastMode ? props.theme.colors.black : props.darkMode ? props.theme.colors.purple200 : props.theme.colors.purple600;
+ }, function (props) {
+   return props.theme.fontSizes.small;
+ });
+@@ -214,9 +216,11 @@ var GraphNodeStatic = /*#__PURE__*/function (_React$PureComponent) {
+       return /*#__PURE__*/_react["default"].createElement(SvgTextContainer, {
+         y: this.props.labelOffset
+       }, /*#__PURE__*/_react["default"].createElement(LabelSvg, {
+-        contrastMode: this.props.contrastMode
++        contrastMode: this.props.contrastMode,
++        darkMode: this.props.darkMode
+       }, this.props.label), /*#__PURE__*/_react["default"].createElement(LabelMinorSvg, {
+-        contrastMode: this.props.contrastMode
++        contrastMode: this.props.contrastMode,
++        darkMode: this.props.darkMode
+       }, this.props.labelMinor));
+     }
+   }, {
+@@ -227,6 +231,7 @@ var GraphNodeStatic = /*#__PURE__*/function (_React$PureComponent) {
+           labelMinor = _this$props.labelMinor,
+           highlighted = _this$props.highlighted,
+           contrastMode = _this$props.contrastMode,
++          darkMode = _this$props.darkMode,
+           labelOffset = _this$props.labelOffset,
+           searchTerms = _this$props.searchTerms;
+       return /*#__PURE__*/_react["default"].createElement("foreignObject", {
+@@ -240,13 +245,15 @@ var GraphNodeStatic = /*#__PURE__*/function (_React$PureComponent) {
+         }
+       }, /*#__PURE__*/_react["default"].createElement(LabelsStandardContainer, null, /*#__PURE__*/_react["default"].createElement(LabelStandard, {
+         highlighted: highlighted,
+-        contrastMode: contrastMode
++        contrastMode: contrastMode,
++        darkMode: darkMode
+       }, /*#__PURE__*/_react["default"].createElement(_MatchedText["default"], {
+         text: label,
+         matches: searchTerms
+       })), !(0, _isEmpty2["default"])(labelMinor) && /*#__PURE__*/_react["default"].createElement(LabelMinorStandard, {
+         highlighted: highlighted,
+-        contrastMode: contrastMode
++        contrastMode: contrastMode,
++        darkMode: darkMode
+       }, /*#__PURE__*/_react["default"].createElement(_MatchedText["default"], {
+         text: labelMinor,
+         matches: searchTerms
+@@ -271,7 +278,8 @@ var GraphNodeStatic = /*#__PURE__*/function (_React$PureComponent) {
+         metricFormattedValue: this.props.metricFormattedValue,
+         metricNumericValue: this.props.metricNumericValue,
+         highlighted: this.props.highlighted,
+-        contrastMode: this.props.contrastMode
++        contrastMode: this.props.contrastMode,
++        darkMode: this.props.darkMode
+       }), /*#__PURE__*/_react["default"].createElement(Tag, {
+         contrastMode: this.props.contrastMode
+       }));
+@@ -285,6 +293,7 @@ GraphNodeStatic.propTypes = {
+   color: _propTypes["default"].string.isRequired,
+   contrastMode: _propTypes["default"].bool.isRequired,
+   cursorType: _propTypes["default"].string.isRequired,
++  darkMode: _propTypes["default"].bool,
+   forceSvg: _propTypes["default"].bool.isRequired,
+   highlighted: _propTypes["default"].bool.isRequired,
+   id: _propTypes["default"].string.isRequired,
+diff --git a/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/_BaseShape.js b/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/_BaseShape.js
+index 44e23ec..afb320c 100644
+--- a/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/_BaseShape.js
++++ b/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/_BaseShape.js
+@@ -113,15 +113,16 @@ var BaseShape = /*#__PURE__*/function (_React$Component) {
+           metricFormattedValue = _this$props.metricFormattedValue,
+           metricNumericValue = _this$props.metricNumericValue,
+           contrastMode = _this$props.contrastMode,
++          darkMode = _this$props.darkMode,
+           size = _this$props.size;
+       var clipId = (0, _dom.encodeIdAttribute)("metric-clip-".concat(id));
+       var hasMetric = !(0, _isEmpty2["default"])(metricFormattedValue) && (0, _isNumber2["default"])(metricNumericValue);
+       return /*#__PURE__*/_react["default"].createElement("g", {
+         transform: "scale(".concat(size, ")")
+-      }, highlighted && (0, _HighlightBorder["default"])(renderTemplate, contrastMode), highlighted && (0, _HighlightShadow["default"])(renderTemplate, contrastMode), (0, _NodeBackground["default"])(renderTemplate, contrastMode), hasMetric && getClipPathDefinition(clipId, metricNumericValue, 0.48), hasMetric && (0, _NodeMetricFill["default"])(renderTemplate, {
++      }, highlighted && (0, _HighlightBorder["default"])(renderTemplate, contrastMode), highlighted && (0, _HighlightShadow["default"])(renderTemplate, contrastMode), (0, _NodeBackground["default"])(renderTemplate, contrastMode, darkMode), hasMetric && getClipPathDefinition(clipId, metricNumericValue, 0.48), hasMetric && (0, _NodeMetricFill["default"])(renderTemplate, {
+         clipId: clipId,
+         metricColor: metricColor
+-      }), (0, _NodeShadow["default"])(renderTemplate, contrastMode), (0, _NodeBorder["default"])(renderTemplate, contrastMode, {
++      }), (0, _NodeShadow["default"])(renderTemplate, contrastMode, darkMode), (0, _NodeBorder["default"])(renderTemplate, contrastMode, {
+         color: color,
+         hasMetric: hasMetric
+       }), hasMetric && highlighted ? /*#__PURE__*/_react["default"].createElement(MetricText, {
+@@ -137,6 +138,7 @@ var BaseShape = /*#__PURE__*/function (_React$Component) {
+ 
+ BaseShape.propTypes = {
+   color: _propTypes["default"].string.isRequired,
++  darkMode: _propTypes["default"].bool,
+   highlighted: _propTypes["default"].bool.isRequired,
+   id: _propTypes["default"].string.isRequired,
+   metricColor: _propTypes["default"].string.isRequired,
+diff --git a/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/elements/_NodeBackground.js b/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/elements/_NodeBackground.js
+index dbafe9c..a50072b 100644
+--- a/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/elements/_NodeBackground.js
++++ b/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/elements/_NodeBackground.js
+@@ -9,10 +9,10 @@ var _theme = _interopRequireDefault(require("../../../../theme"));
+ 
+ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+ 
+-var NodeBackground = function NodeBackground(renderTemplate) {
++var NodeBackground = function NodeBackground(renderTemplate, contrastMode, darkMode) {
+   return renderTemplate({
+     style: {
+-      fill: _theme["default"].colors.white,
++      fill: contrastMode ? _theme["default"].colors.white : darkMode ? _theme["default"].colors.purple900 : _theme["default"].colors.white,
+       stroke: 'none'
+     },
+     transform: "scale(".concat(0.48, ")")
+diff --git a/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/elements/_NodeShadow.js b/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/elements/_NodeShadow.js
+index 399394a..48cd881 100644
+--- a/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/elements/_NodeShadow.js
++++ b/node_modules/weaveworks-ui-components/lib/components/GraphNode/shapes/elements/_NodeShadow.js
+@@ -9,11 +9,11 @@ var _theme = _interopRequireDefault(require("../../../../theme"));
+ 
+ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
+ 
+-var NodeShadow = function NodeShadow(renderTemplate, contrastMode) {
++var NodeShadow = function NodeShadow(renderTemplate, contrastMode, darkMode) {
+   return renderTemplate({
+     style: {
+       fill: 'none',
+-      stroke: contrastMode ? _theme["default"].colors.white : _theme["default"].colors.gray50,
++      stroke: contrastMode ? _theme["default"].colors.white : darkMode ? _theme["default"].colors.black : _theme["default"].colors.gray50,
+       strokeWidth: contrastMode ? 0.25 : 0.18
+     },
+     transform: "scale(".concat(0.49, ")")
