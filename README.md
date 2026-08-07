@@ -168,7 +168,7 @@ docker run -d --restart=always \
   --entrypoint /usr/bin/scope \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v /sys/kernel/debug:/sys/kernel/debug \
-  ghcr.io/alfiyansys/scope:modernized-8f6b5774 \
+  ghcr.io/alfiyansys/scope:modernized-40476f05 \
   --mode=probe --probe.docker=true --weave=false --no-app <app-host>:4040
 ```
 
