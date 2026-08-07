@@ -1,8 +1,8 @@
 import React from 'react';
 import classNames from 'classnames';
 import { connect } from 'react-redux';
+import { withTheme } from 'styled-components';
 import { fromJS, Map as makeMap, List as makeList } from 'immutable';
-import theme from 'weaveworks-ui-components/lib/theme';
 
 import NodeContainer from './node-container';
 import EdgeContainer from './edge-container';
@@ -205,7 +205,7 @@ class NodesChartElements extends React.Component {
         className={className}
         key="nodes-chart-overlay"
         transform={`scale(${scale})`}
-        fill={theme.colors.purple25}
+        fill={this.props.theme.scope.nodeOverlayColor}
         x={-1}
         y={-1}
         width={2}
@@ -288,4 +288,4 @@ function mapStateToProps(state) {
   };
 }
 
-export default connect(mapStateToProps)(NodesChartElements);
+export default connect(mapStateToProps)(withTheme(NodesChartElements));
