@@ -8,9 +8,10 @@ standing infrastructure on the user's Swarm cluster (manager
 `vanguard`) — a different, ongoing concern: deployment topology,
 image distribution, and operational follow-ups, not code changes.
 
-Also covers non-Swarm hosts that report into the same central app
-over Tailscale (see Stage 5) — not cluster members, just additional
-probes.
+Also covers non-Swarm hosts that report into the same central app —
+not cluster members, just additional probes: over Tailscale from
+another LAN (Stage 5), and as a native systemd-managed binary on a
+host with no Docker at all (Stage 7).
 
 Depends on `MODERNIZATION-PLAN.md` Phases 1–3 being done (Go
 toolchain, Docker client, Swarm support) — it is, as of this plan's
@@ -24,6 +25,7 @@ creation.
 | Per-node probe agents (Swarm global service) | **Live** — `scope_probe` on all 3 worker nodes, `sm-qohelet` covered by `scope_app`'s bundled probe |
 | Supplementary host-networked probes (Stage 3) | **Live** — `scope-host-probe` (plain `docker run`, not Swarm-managed) on all 4 nodes, for real cross-container traffic visibility Swarm services can't provide |
 | Cross-host communication graph | **Confirmed with real traffic** — e.g. `traefik` ↔ `dvr-window` visible as a live cross-node edge, not just Scope's own internal traffic |
+| Native (no-Docker) probe on `jellyfin` | **Staged, install pending** — binary built and smoke-tested on the host, systemd unit written; the privileged install step (Stage 7) hasn't been run yet |
 
 ## Stage 1 — Central app on the manager (done)
 
@@ -274,3 +276,153 @@ Turns the findings above into an ordered, executable plan. Each sub-phase has a 
 **Definition of Done:** fleet-wide footprint measurably reduced, no functional regression in any topology view across all 5 nodes, resource limits in place, and the two latent findings (duplicate packet capture, Swarm probes never getting the eBPF fix) are resolved as a side effect of removal — not patched independently, since the probes causing them are gone.
 
 **Execution order:** 6.1 → 6.2 → 6.3 in sequence (each gates the next); 6.4 can run in parallel with any of them or first; 6.5 last, after everything else lands.
+
+## Stage 7 — Native (no-Docker) probe on `jellyfin` (staged, install pending, 2026-08-14)
+
+**Why:** first host in the fleet with **no Docker at all**, so every prior
+stage's delivery mechanism (`docker run` / Swarm service / GHCR pull) is
+unavailable by definition. This is the first deployment of the probe as a
+plain binary managed by systemd rather than a container.
+
+**Host:** `jellyfin.home.alfiyan.net` — Ubuntu 24.04, x86_64, 1 vCPU /
+1 GiB RAM, an **unprivileged LXC container** under Proxmox (kernel
+`6.17.13-2-pve`), on the same `192.168.24.0/21` LAN as the manager
+(`192.168.25.112` vs `sm-qohelet` at `192.168.25.130`). Not a Swarm member.
+
+### Target resolution — `sm-qohelet.local` did not resolve
+
+Unlike Stage 5's Tailscale case, the network path was never the problem:
+`curl http://192.168.25.130:4040/api` returned `HTTP 200` from the host
+immediately. Only the *name* failed. The host had no mDNS stack at all
+(`avahi-daemon` inactive, no `libnss-mdns`), and its DNS server
+(`192.168.25.101`, search domain `home.alfiyan.id`) has no record for
+`sm-qohelet` under any of `sm-qohelet`, `sm-qohelet.home.alfiyan.id`, or
+Stage 5's `qohelet.home`.
+
+Fixed by installing `avahi-daemon` + `libnss-mdns` on the host. Chosen over
+the two alternatives deliberately: an `/etc/hosts` pin breaks silently if
+`sm-qohelet`'s DHCP lease changes, and pointing the probe at the raw IP has
+the same fragility while also diverging from the `.local` name used
+everywhere else in this deployment. Confirmed working — `nsswitch.conf`
+hosts line is now `files mdns4_minimal [NOTFOUND=return] dns`, and
+`sm-qohelet.local` both resolves and returns `HTTP 200` from the host.
+
+### Build — two deliberate departures from the Makefile's flags
+
+Built natively (`go build ./prog`), **not** in the Docker build container
+and not via `docker/Dockerfile.deploy` — there's no Docker on either end of
+this path. Two flag changes from `Makefile`'s `GO_BUILD_FLAGS`, both
+load-bearing:
+
+- **Dropped the `netgo` build tag.** This is the non-obvious one and it is
+  what makes the whole stage work. With `netgo`, Go uses its pure-Go
+  resolver, which reads `/etc/resolv.conf` and `/etc/hosts` directly and
+  **ignores NSS modules entirely** — so `libnss-mdns` would never be
+  consulted and `sm-qohelet.local` would still fail to resolve, even with
+  avahi running. Building against the cgo resolver (CGO is already required
+  here for `gopacket`/libpcap) is what lets `mdns4_minimal` do its job.
+  Don't "restore consistency with the Makefile" by adding `netgo` back.
+- **Dropped `-extldflags "-static"`.** Fully static linking with CGO would
+  need static `libpcap`/`libibverbs`/`libnl`, which is messy and buys
+  nothing here: the build host and `jellyfin` are both Ubuntu 24.04 on
+  glibc 2.39, so the dynamic build is ABI-compatible. Verified before
+  shipping that all 12 of the binary's shared-library dependencies
+  (`libpcap.so.0.8`, `libibverbs.so.1`, `libnl-route-3`, `libsystemd`,
+  `libdbus-1`, `libgcrypt`, …) already exist on the target — **no extra
+  runtime packages needed beyond avahi.**
+
+Kept `osusergo unsafe` tags and `-X main.version=<short-sha> -s -w`.
+Result: a 94 MB stripped binary (large because `prog/staticui` embeds the
+whole UI — the binary is monolithic app+probe, and there's no probe-only
+build target; not worth a code change just for this).
+
+### systemd unit
+
+```ini
+[Unit]
+Description=Weave Scope probe (native, alfiyansys fork)
+After=network-online.target avahi-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/scope \
+    --mode=probe \
+    --no-app \
+    --weave=false \
+    --probe.docker=false \
+    --probe.log.prefix=<jellyfin> \
+    sm-qohelet.local:4040
+Restart=always
+RestartSec=5s
+User=root
+LimitNOFILE=65536
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`--probe.docker=false` (there is no Docker to inspect) and `--no-app` for
+the same reason as every prior stage — it suppresses `prog/main.go`'s
+default `127.0.0.1:<port>` publish target so only `sm-qohelet.local:4040`
+is used. `After=avahi-daemon.service` matters: without it the probe can
+start before the resolver that makes its target name resolvable.
+
+**Resource limits are set here from the start** (`MemoryMax=256M`,
+`CPUQuota=50%`) rather than deferred — this is the smallest host in the
+fleet (1 vCPU / 1 GiB, shared with the actual media server), and comparable
+probes elsewhere measured 54–139 MiB in the Stage-4 baseline above. This is
+Stage 6.4's "cheap insurance" applied preemptively to the one host that
+most needs it.
+
+**Reboot survival:** `systemctl enable --now` means this host closes the
+gap left open since Stage 3 and repeated in Stage 5 — it is the first probe
+in the fleet with a real supervisor story rather than relying on Docker's
+`--restart=always`.
+
+### Known limitation — no eBPF, and conntrack is doubtful
+
+`jellyfin` is an **unprivileged LXC container**, and that caps what the
+probe can observe regardless of running as root:
+
+- `/sys/kernel/debug` is not readable (`kprobe_events`: permission denied),
+  and BPF map creation is blocked — the smoke test failed with
+  `error while loading map "maps/tcp_event_ipv4": operation not permitted`
+  and fell back to proc scanning. **Stage 3's debugfs bind-mount fix does
+  not apply here** — there's no container to mount into, and the
+  restriction is the LXC user namespace, not a missing mount.
+- The unprivileged smoke test also logged `conntrack Follow error:
+  operation not permitted` roughly twice a second, and
+  `Failed to start DNS snooper: Permission Denied`. Whether root inside
+  this LXC clears either is **not yet known** — to be confirmed from the
+  service logs once the install runs. If conntrack stays broken as root,
+  connection-level edges for this host will be limited and the log spam
+  needs quieting.
+
+Expected outcome either way: `jellyfin` appears as its own host with its
+processes and host metrics; deep connection-level tracking is the part at
+risk. Same shape of limitation as Stage 5's, different root cause
+(namespace restrictions here, no shared network path there).
+
+### Status — what's actually done vs. pending
+
+Done: avahi installed and verified; binary built, version-stamped
+(`b08793ca6`), and staged to `~/scope-deploy/` on the host alongside the
+unit file and a re-runnable installer; linkage verified on the target;
+smoke-tested on the host, where it resolved `sm-qohelet.local` and brought
+up both `Control connection to sm-qohelet.local starting` and
+`Publish loop for sm-qohelet.local starting`.
+
+**Pending:** the privileged install itself
+(`sudo sh ~/scope-deploy/install-scope-probe.sh` — installs to
+`/usr/local/bin/scope`, drops the unit, `enable --now`). Blocked only on
+sudo requiring a password on this host; root SSH is disabled. Until that
+runs there is **no probe running on `jellyfin`** and it does not appear in
+the UI.
+
+**Definition of Done:** service active and enabled, `jellyfin` visible as
+its own node in `/api/topology/hosts` alongside the 5 existing hosts, the
+service survives a reboot, and the conntrack-under-root question above is
+answered one way or the other in this file.
