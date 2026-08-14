@@ -25,7 +25,7 @@ creation.
 | Per-node probe agents (Swarm global service) | **Live** — `scope_probe` on all 3 worker nodes, `sm-qohelet` covered by `scope_app`'s bundled probe |
 | Supplementary host-networked probes (Stage 3) | **Live** — `scope-host-probe` (plain `docker run`, not Swarm-managed) on all 4 nodes, for real cross-container traffic visibility Swarm services can't provide |
 | Cross-host communication graph | **Confirmed with real traffic** — e.g. `traefik` ↔ `dvr-window` visible as a live cross-node edge, not just Scope's own internal traffic |
-| Native (no-Docker) probe on `jellyfin` | **Staged, install pending** — binary built and smoke-tested on the host, systemd unit written; the privileged install step (Stage 7) hasn't been run yet |
+| Native (no-Docker) probe on `jellyfin` | **Live, rootless** — `systemctl --user` unit with linger; registers as a 6th host, but reports only 3 of 31 processes and no connection data, since an unprivileged probe can't read other users' `/proc` (Stage 7) |
 
 ## Stage 1 — Central app on the manager (done)
 
@@ -277,7 +277,7 @@ Turns the findings above into an ordered, executable plan. Each sub-phase has a 
 
 **Execution order:** 6.1 → 6.2 → 6.3 in sequence (each gates the next); 6.4 can run in parallel with any of them or first; 6.5 last, after everything else lands.
 
-## Stage 7 — Native (no-Docker) probe on `jellyfin` (staged, install pending, 2026-08-14)
+## Stage 7 — Native (no-Docker) probe on `jellyfin` (live rootless, 2026-08-14)
 
 **Why:** first host in the fleet with **no Docker at all**, so every prior
 stage's delivery mechanism (`docker run` / Swarm service / GHCR pull) is
@@ -336,7 +336,11 @@ Result: a 94 MB stripped binary (large because `prog/staticui` embeds the
 whole UI — the binary is monolithic app+probe, and there's no probe-only
 build target; not worth a code change just for this).
 
-### systemd unit
+### systemd unit (privileged — written and staged, NOT installed)
+
+This is the root/system unit. It is staged at `~/scope-deploy/` on the host
+but was never installed; see "What was actually deployed" below for what is
+running instead. Kept here because it's the upgrade path to real coverage.
 
 ```ini
 [Unit]
@@ -377,38 +381,58 @@ probes elsewhere measured 54–139 MiB in the Stage-4 baseline above. This is
 Stage 6.4's "cheap insurance" applied preemptively to the one host that
 most needs it.
 
-**Reboot survival:** `systemctl enable --now` means this host closes the
-gap left open since Stage 3 and repeated in Stage 5 — it is the first probe
-in the fleet with a real supervisor story rather than relying on Docker's
-`--restart=always`.
+**Reboot survival** is achieved either way — the rootless unit that was
+actually deployed gets it from `systemctl --user enable` plus linger. Either
+route makes this the first probe in the fleet with a real supervisor story
+rather than relying on Docker's `--restart=always`, closing the gap left
+open since Stage 3 and repeated in Stage 5.
 
-### Considered and rejected: `~/.local/bin` + `systemctl --user`
+### What was actually deployed: rootless `--user` unit
 
-The obvious appeal is avoiding root entirely, since `sudo` on this host
-needs a password. **It does not actually avoid root, and it cripples the
-probe.** Both halves measured on the host, not assumed:
+The system unit above is written and staged but **was not the thing
+installed.** The user chose the rootless route and enabled linger
+(`loginctl show-user alfiyan -p Linger` → `Linger=yes`), which removed the
+one blocker that made it non-viable, so the probe currently runs as:
 
-- **It still needs one `sudo`.** `loginctl enable-linger alfiyan` fails with
-  `Access denied` for the unprivileged user. Without linger a user unit is
-  killed at logout and never starts at boot, which is disqualifying for a
-  standing agent. So the choice is `sudo sh install-scope-probe.sh` vs.
-  `sudo loginctl enable-linger alfiyan` — the same single password prompt
-  either way.
-- **It would see a fraction of the host.** Scope joins connections to
-  processes by walking `/proc/PID/fd` for socket inodes and matching them
-  against `/proc/net/tcp`. Sampled as the unprivileged user, only **4 of 33**
-  `/proc/PID/fd` entries were readable (29 denied), and only **9 of 31**
-  processes are owned by that user. The result would be endpoints with no
-  process attached — and Jellyfin itself runs under its own service user,
-  so the single most interesting workload on this host would be invisible.
-  This is on top of the conntrack/pcap/eBPF losses documented below, none
-  of which a user unit helps with either.
+- binary at `~/.local/bin/scope`
+- unit at `~/.config/systemd/user/scope-probe.service`,
+  `WantedBy=default.target`, `systemctl --user enable --now`
 
-`setcap` on the binary plus a user unit is the theoretical middle ground,
-but `setcap` also requires root, file capabilities are unreliable inside an
-unprivileged LXC, and linger would still be required — strictly more moving
-parts for the same one-time password prompt. Don't re-litigate this without
-new information; the numbers above are the reason.
+Differences forced by the user-unit context: a user unit **cannot** order
+itself against a system unit, so `After=avahi-daemon.service` is dropped and
+`Restart=always` covers the case where name resolution isn't ready at first
+start. Resource limits do still apply — `user-1000.slice` delegates
+`cpu memory pids`, confirmed by reading `cgroup.controllers` — and the
+service reports `Memory: 26.6M (max: 256.0M)` in practice.
+
+**This works, and it costs almost all of the probe's value.** Measured
+against the live app after deployment, not predicted:
+
+| | |
+|---|---|
+| `jellyfin;<host>` in `/api/topology/hosts` | present — 6th host ✅ |
+| Processes reported | **3 of 31** |
+| Containers reported | 0 (expected — no Docker) |
+| conntrack | still `operation not permitted` |
+
+The three processes it reports are `~/.local/bin/scope` (itself),
+`/usr/lib/systemd/systemd` (its own `systemd --user`), and a transient
+`-bash` from the deploying SSH session. **`jellyfin.service` is active on
+this host and does not appear**, nor do `sshd`, `avahi-daemon`, `rsyslog`,
+`postfix`, `cron`, or `systemd-resolved` — they run as other users, and
+Scope's process/connection walk over `/proc/PID/fd` is denied for all of
+them (sampled unprivileged: only **4 of 33** `/proc/PID/fd` readable,
+**9 of 31** processes owned by this user). Net effect: the host shows up on
+the map, and reports essentially only itself.
+
+**To switch to the privileged version**, everything needed is already
+staged on the host — `sudo sh ~/scope-deploy/install-scope-probe.sh`, after
+`systemctl --user disable --now scope-probe.service`. That is the only way
+to get real process and connection coverage here; no rootless variant
+reaches it, since the limit is `/proc` permissions rather than anything
+configurable. `setcap` plus a user unit is the theoretical middle ground,
+but `setcap` needs root anyway and file capabilities are unreliable inside
+an unprivileged LXC.
 
 ### Known limitation — no eBPF, and conntrack is doubtful
 
@@ -434,23 +458,25 @@ processes and host metrics; deep connection-level tracking is the part at
 risk. Same shape of limitation as Stage 5's, different root cause
 (namespace restrictions here, no shared network path there).
 
-### Status — what's actually done vs. pending
+### Status
 
-Done: avahi installed and verified; binary built, version-stamped
-(`b08793ca6`), and staged to `~/scope-deploy/` on the host alongside the
-unit file and a re-runnable installer; linkage verified on the target;
-smoke-tested on the host, where it resolved `sm-qohelet.local` and brought
-up both `Control connection to sm-qohelet.local starting` and
-`Publish loop for sm-qohelet.local starting`.
+**Live, rootless.** avahi installed and verified; binary built and
+version-stamped (`b08793ca6`); running under `systemctl --user` with linger
+enabled, so it survives logout and starts at boot. `jellyfin` appears as
+the 6th host in `/api/topology/hosts`. Publish loop and control connection
+to `sm-qohelet.local` both up.
 
-**Pending:** the privileged install itself
-(`sudo sh ~/scope-deploy/install-scope-probe.sh` — installs to
-`/usr/local/bin/scope`, drops the unit, `enable --now`). Blocked only on
-sudo requiring a password on this host; root SSH is disabled. Until that
-runs there is **no probe running on `jellyfin`** and it does not appear in
-the UI.
+**The conntrack question from the smoke test is answered only for the
+non-root case: it stays denied.** `conntrack Follow error: operation not
+permitted` continues under the user unit, along with the blocked DNS
+snooper and eBPF. Whether *root* inside this unprivileged LXC clears any of
+them is **still untested**, because the privileged unit was never
+installed — the LXC user namespace may well deny root too, as it does for
+`/sys/kernel/debug`. Don't record an answer here until it's actually run.
 
-**Definition of Done:** service active and enabled, `jellyfin` visible as
-its own node in `/api/topology/hosts` alongside the 5 existing hosts, the
-service survives a reboot, and the conntrack-under-root question above is
-answered one way or the other in this file.
+**Definition of Done:** partially met. Service is active, enabled, and
+reboot-durable, and `jellyfin` is visible as its own node — but the host
+contributes 3 processes and no connection data, so this is presence on the
+map rather than useful visibility. Closing it properly needs either the
+privileged install or an explicit decision to accept host-level presence
+only.
