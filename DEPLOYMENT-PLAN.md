@@ -382,6 +382,34 @@ gap left open since Stage 3 and repeated in Stage 5 — it is the first probe
 in the fleet with a real supervisor story rather than relying on Docker's
 `--restart=always`.
 
+### Considered and rejected: `~/.local/bin` + `systemctl --user`
+
+The obvious appeal is avoiding root entirely, since `sudo` on this host
+needs a password. **It does not actually avoid root, and it cripples the
+probe.** Both halves measured on the host, not assumed:
+
+- **It still needs one `sudo`.** `loginctl enable-linger alfiyan` fails with
+  `Access denied` for the unprivileged user. Without linger a user unit is
+  killed at logout and never starts at boot, which is disqualifying for a
+  standing agent. So the choice is `sudo sh install-scope-probe.sh` vs.
+  `sudo loginctl enable-linger alfiyan` — the same single password prompt
+  either way.
+- **It would see a fraction of the host.** Scope joins connections to
+  processes by walking `/proc/PID/fd` for socket inodes and matching them
+  against `/proc/net/tcp`. Sampled as the unprivileged user, only **4 of 33**
+  `/proc/PID/fd` entries were readable (29 denied), and only **9 of 31**
+  processes are owned by that user. The result would be endpoints with no
+  process attached — and Jellyfin itself runs under its own service user,
+  so the single most interesting workload on this host would be invisible.
+  This is on top of the conntrack/pcap/eBPF losses documented below, none
+  of which a user unit helps with either.
+
+`setcap` on the binary plus a user unit is the theoretical middle ground,
+but `setcap` also requires root, file capabilities are unreliable inside an
+unprivileged LXC, and linger would still be required — strictly more moving
+parts for the same one-time password prompt. Don't re-litigate this without
+new information; the numbers above are the reason.
+
 ### Known limitation — no eBPF, and conntrack is doubtful
 
 `jellyfin` is an **unprivileged LXC container**, and that caps what the
